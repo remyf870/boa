@@ -1,0 +1,32 @@
+# Gitleaks configuration — Massy Motors Purchase Approval & DOA Enforcement app.
+#
+# ISO 27001 A.8.9 (Configuration management): zero secrets in the repo.
+# Acceptance test: "Secret scanner in CI passes on a clean history."
+#
+# Policy: extend the full gitleaks default ruleset and stay STRICT.
+# Additions to the allowlist require peer review and a written justification
+# in the PR — an allowlist entry is a recorded exception (plan §8.3.4),
+# never a way to silence a real finding.
+
+title = "massy-purchase-approval-gitleaks"
+
+[extend]
+# Inherit every default gitleaks detection rule.
+useDefault = true
+
+[allowlist]
+description = "Reviewed, documented exceptions only — keep this list minimal"
+
+paths = [
+  # Environment variable *templates* only. These files document variable
+  # names with placeholder values and must never contain real credentials.
+  '''\.env\.example$''',
+  '''\.env\.sample$''',
+]
+
+regexes = [
+  # The deliberately fake, low-entropy, CI-only stub values defined in
+  # .github/workflows/ci.yml. Test-only; not credentials.
+  '''ci-only-fake-session-secret-0{36}''',
+  '''ci-only-fake-entra-client-secret-not-a-real-credential''',
+]

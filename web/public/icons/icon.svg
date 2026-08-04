@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Massy Purchasing app icon: approved-requisition document on neutral slate -->
+  <rect width="512" height="512" rx="96" fill="#1e293b" />
+  <rect x="136" y="104" width="240" height="304" rx="24" fill="#f8fafc" />
+  <rect x="168" y="152" width="176" height="20" rx="10" fill="#cbd5e1" />
+  <rect x="168" y="196" width="128" height="20" rx="10" fill="#cbd5e1" />
+  <path
+    d="M190 302 l52 52 90 -104"
+    fill="none"
+    stroke="#1e293b"
+    stroke-width="34"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>

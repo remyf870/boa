@@ -1,0 +1,35 @@
+# Dependabot — automated dependency update PRs (ISO 27001 A.8.8, plan §8.1).
+# Works with the npm-audit CI gate: Dependabot raises the patch PRs; CI fails
+# any build carrying a High/Critical advisory until they are merged.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /server
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - server
+
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - web
+
+  # Keep the CI actions themselves patched (supply chain — A.8.8).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions

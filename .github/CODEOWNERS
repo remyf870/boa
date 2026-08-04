@@ -1,0 +1,19 @@
+# CODEOWNERS — Massy Motors Purchase Approval & DOA Enforcement app.
+#
+# ISO 27001 A.8.25 (Secure development life cycle): mandatory peer review,
+# no direct commits to main. CODEOWNERS makes review assignment automatic,
+# but it only ENFORCES anything once branch protection is configured.
+#
+# TODO(client): when the GitHub organization repo is created —
+#   1. Replace the placeholder team below with the real owning team.
+#   2. Enable branch protection on `main`:
+#        - require a pull request before merging (no direct pushes),
+#        - require at least 1 approving review from a code owner,
+#        - require the "CI" workflow jobs (server, web, secrets) as
+#          passing status checks,
+#        - block force pushes and branch deletion.
+#      Acceptance test (plan §8.1 A.8.25): a direct push to main is blocked.
+#   3. Add the GITLEAKS_LICENSE org secret required by gitleaks-action
+#      in organization repos (see .github/workflows/ci.yml).
+
+* @massy-motors/purchasing-dev

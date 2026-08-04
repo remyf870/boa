@@ -1,0 +1,157 @@
+# CI pipeline — Massy Motors Purchase Approval & DOA Enforcement app.
+#
+# Implements the ISO 27001 Annex A gates that fall to CI (plan §8.1):
+#   A.8.8  — dependency vulnerability scanning; build FAILS on High/Critical.
+#   A.8.9  — secret scanning over the full git history (gitleaks).
+#   A.8.29 — automated tests run on every push / PR to main.
+#
+# NOTE: server/ and web/ are scaffolded by other workstreams. This workflow
+# targets their conventional npm scripts (typecheck, lint, migrate, test, build).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server:
+    name: Server (typecheck, lint, test, audit)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: massy_test
+          POSTGRES_PASSWORD: massy_test
+          POSTGRES_DB: massy_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U massy_test -d massy_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgres://massy_test:massy_test@localhost:5432/massy_test
+      # --- TEST-ONLY STUB VALUES (A.8.9 / A.8.31) -------------------------
+      # These are deliberately fake, low-entropy, CI-only values. They are
+      # NOT secrets and must never resemble real ones. Real secrets live only
+      # in the production secret store (Key Vault / DPAPI per plan §2) and
+      # are never present in this repository or in CI for test runs.
+      # SESSION_SECRET is a clearly-fake 64-character test value.
+      SESSION_SECRET: ci-only-fake-session-secret-000000000000000000000000000000000000
+      # Entra ID OIDC stubs — auth is mocked/stubbed under NODE_ENV=test.
+      # TODO(client): align variable names with server config module if they drift.
+      ENTRA_TENANT_ID: 00000000-0000-0000-0000-000000000000
+      ENTRA_CLIENT_ID: 00000000-0000-0000-0000-000000000000
+      ENTRA_CLIENT_SECRET: ci-only-fake-entra-client-secret-not-a-real-credential
+      APP_BASE_URL: http://localhost:3000
+      # --------------------------------------------------------------------
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Run database migrations (A.8.32 — versioned migrations)
+        run: npm run migrate
+
+      - name: Test (A.8.29)
+        run: npm test
+
+      # A.8.8 — Management of technical vulnerabilities.
+      # --audit-level=high makes npm audit exit non-zero on High/Critical
+      # advisories, failing the build as the control requires.
+      - name: Dependency vulnerability scan (A.8.8)
+        run: npm audit --audit-level=high
+
+  web:
+    name: Web (typecheck, lint, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Prefer the project's "typecheck" script; fall back to tsc --noEmit
+      # so the type gate cannot be skipped silently.
+      - name: Typecheck
+        run: |
+          if node -e "process.exit((require('./package.json').scripts || {}).typecheck ? 0 : 1)"; then
+            npm run typecheck
+          else
+            npx tsc --noEmit
+          fi
+
+      # --if-present: skip cleanly if the web scaffold has no lint script yet.
+      - name: Lint (if present)
+        run: npm run lint --if-present
+
+      - name: Build
+        run: npm run build
+
+      # A.8.8 — same High/Critical gate as the server workspace.
+      - name: Dependency vulnerability scan (A.8.8)
+        run: npm audit --audit-level=high
+
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      # A.8.9 — "Secret scanner in CI passes on a clean history."
+      # fetch-depth: 0 pulls the FULL history so gitleaks scans every commit,
+      # not just the tip.
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # gitleaks picks up .gitleaks.toml at the repo root automatically.
+      # TODO(client): when this repo moves into a GitHub *organization*,
+      # gitleaks-action requires a (free-to-request) GITLEAKS_LICENSE org
+      # secret — add it, and enable this job as a required status check
+      # under branch protection (A.8.25).
+      - name: Gitleaks (A.8.9)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

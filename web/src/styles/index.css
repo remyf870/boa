@@ -1,0 +1,13 @@
+@import "tailwindcss";
+
+/* Phase 0 base styles: light theme, neutral palette, dense desktop UI. */
+:root {
+  color-scheme: light;
+}
+
+body {
+  background-color: #f8fafc; /* slate-50 */
+  color: #0f172a; /* slate-900 */
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}

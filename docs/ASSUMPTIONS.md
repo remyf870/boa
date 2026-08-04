@@ -1,0 +1,112 @@
+# Assumptions Register — Massy Motors Purchase Approval & DOA Enforcement App
+
+> Maintained per plan §0.4: every assumption made without a client answer is recorded here with a
+> `TODO(client)` marker instead of being silently chosen. This register is an input to plan §9
+> (open questions) and to the A.5.31 legal/retention confirmation. Nothing in this file is a
+> settled decision until the corresponding `TODO(client)` is cleared and the entry is moved to a
+> dated "Resolved" section.
+>
+> Document owner: Development team. Review cadence: at every phase gate, and whenever a client
+> answer arrives. Last updated: 2026-08-04.
+
+---
+
+## 1. Open questions from plan §9 — status table
+
+| # | Question (plan §9) | Interim assumption used in the build | Status |
+|---|---|---|---|
+| 1 | **DOA content** — thresholds, approver roles, escalation paths | A realistic draft DOA matrix (synthetic, Leasing-shaped) is used for development and testing only. It is loaded as a normal versioned DOA upload so it is fully replaceable by the client's real matrix with no code change. No threshold is hardcoded anywhere (plan §0.3). `TODO(client)` | Awaiting client |
+| 2 | **Currency** — single base or multi-currency with FX? Which base? | Single base currency **TTD** assumed. The `currency` columns exist throughout the schema, but validation rejects any currency other than the configured base; FX conversion and multi-currency budgets are deferred until the client answers. `TODO(client)` | Awaiting client |
+| 3 | **Budget structure** — annual or quarterly? Cost centre only or cost centre × category? Carry-forward? | Budgets assumed **quarterly**, per **cost centre × category**, with **no carry-forward** of unspent amounts between periods. The `budgets` table carries `period` and `category_id` so any of the alternatives is a data/config change, not a schema change. `TODO(client)` | Awaiting client |
+| 4 | **Approval routing** — sequential vs parallel; downward delegation? | Routing assumed **strictly sequential** (step N+1 does not open until step N approves, per plan §5.2). **No downward delegation**: an approver cannot approve at a lower level than the DOA requires. Peer delegation for absence cover is supported and records both identities. `TODO(client)` | Awaiting client |
+| 5 | **CDK** — product, edition, hosting model; API/ODBC licensed and contractually permitted? | No live CDK integration in MVP (plan §6.5). The build captures CDK-shaped reference fields (`cdk_vendor_ref`, `gl_account_code`, `cdk_reference`) and produces an Excel batch export in CDK's expected column layout. Product/edition, hosting model, API/ODBC licensing, and contract permissions are **unknown**; Phase 2 integration design is blocked on these answers. `TODO(client)` | Awaiting client |
+| 6 | **Retention** — how long must requisitions and invoices be kept (tax law + Massy Group policy)? | **7 years assumed for financial records pending legal confirmation.** This is recorded as a **question, not a settled answer** (A.5.31 requires the applicable law and retention obligations to be confirmed with the client's legal team — see §2.4 below). No purge/archival job is built until confirmed; nothing is deleted in the meantime (A.5.33). `TODO(client)` | Awaiting client |
+| 7 | **Jurisdiction & data protection law** — which country's law; must data stay in-country? | **Trinidad & Tobago** data protection law (Data Protection Act) assumed to govern, and **data assumed to stay on-premises** inside the Massy network boundary. This drives the on-prem hosting default in plan §2 and interacts with Q12 (Power BI). `TODO(client)` | Awaiting client |
+| 8 | **Entra ID** — will IT grant an app registration and Graph permissions? | App registration **not yet granted**. A **dev-mode authentication stub** is used in development only; it **refuses to run in production** (hard startup failure if `NODE_ENV=production`). All auth code is written against the OIDC authorization-code-with-PKCE flow so swapping in the real Entra registration is configuration, not code. This is a known go-live blocker (plan §2 ask-list item 4). `TODO(client)` | Awaiting client |
+| 9 | **Emergency purchases** — break-glass path for urgent buys? | **Not built in Phase 0.** No emergency/retrospective-approval path exists yet. If the client wants one, plan §9 Q9 prescribes the shape (retrospective approval within 24 h, permanently flagged, reported monthly) and it will be designed deliberately in a later phase. Until then, out-of-hours purchases will surface on the Maverick Spend report. `TODO(client)` | Awaiting client |
+| 10 | **Existing PO numbering** — align Approval Reference with an existing PO series? | Reference format `MM-<DEPT>-<YYYY>-<seq>` (e.g. `MM-LEA-2026-0001`) per plan §5.3, with `-APR` suffix on the approval reference. **Alignment with any existing Massy PO series is unconfirmed**; the generator is isolated in one module so the format can change before pilot without touching business logic. `TODO(client)` | Awaiting client |
+| 11 | **Remote access** — can approvers act off-site; via VPN or Entra Private Access? | **Undecided — flagged.** Default position per plan §2 is none (office-only). Both candidate paths (existing corporate VPN vs Entra Private Access with Conditional Access) are documented; the app itself makes no assumption and requires no change either way. Must be settled **before go-live**. `TODO(client)` | Awaiting client |
+| 12 | **Power BI hosting** — Power BI Service (cloud) or Power BI Report Server (on-prem)? | **Undecided — flagged.** If Power BI Service is chosen, requisition/budget data leaves the organisational boundary → A.5.23 assessment and a `/docs/THIRD-PARTIES.md` entry become mandatory, and this interacts with Q7 data residency. Reporting views will mask PII (A.8.11) in either case. `TODO(client)` | Awaiting client |
+
+---
+
+## 2. Build assumptions in detail
+
+Each item below is what the build actually does today, and what changes when the client answers.
+
+### 2.1 Currency — single base TTD
+- Assumed: one base currency, **TTD**. All amounts (requisitions, budgets, DOA bands) validated against the configured base currency; mixed-currency comparisons never occur.
+- Deferred: multi-currency, FX rates, FX-date policy.
+- Impact if wrong: DOA band matching and budget arithmetic must define an FX policy; schema already carries `currency` columns so no migration is needed for storage.
+- `TODO(client)` — confirm base currency and whether multi-currency is required (plan §9 Q2).
+
+### 2.2 Budgets — quarterly, cost centre × category, no carry-forward
+- Assumed: budget rows are per quarter, per cost centre × category; unspent amounts do **not** carry forward.
+- `Available = Budget − Committed − Actual` is computed within the period only.
+- `TODO(client)` — confirm period, granularity, carry-forward (plan §9 Q3).
+
+### 2.3 Approval routing — strictly sequential, no downward delegation
+- Assumed: sequential chain per plan §5.2; any denial ends the chain; denial reason mandatory; nothing is ever auto-approved.
+- Not built: parallel approval levels; approving at a lower level than the DOA requires (downward delegation).
+- `TODO(client)` — confirm routing semantics (plan §9 Q4).
+
+### 2.4 Retention — 7 years assumed, **recorded as a question, not an answer** (A.5.31)
+- Assumed working figure: **7 years** for requisitions, approvals, invoices, and their audit trail, pending confirmation by the client's legal team of the applicable tax law and Massy Group records policy.
+- A.5.31's acceptance test is that this file records the **confirmed answer, not a guess** — that test is deliberately **not yet passed**; this entry exists precisely to keep it visible.
+- Until confirmed: no retention-driven purge or archival exists; financial records are never hard-deleted regardless (A.5.33).
+- `TODO(client)` — legal team to confirm retention periods and governing statute (plan §9 Q6).
+
+### 2.5 Jurisdiction — Trinidad & Tobago, data on-prem
+- Assumed: Trinidad & Tobago law governs; all production data (database, attachments, backups) stays on-premises inside the Massy corporate network.
+- Interacts with: Q12 (Power BI Service would move data off-prem → A.5.23), and the Azure hosting alternative in plan §2 (not taken).
+- `TODO(client)` — confirm jurisdiction and residency requirement (plan §9 Q7).
+
+### 2.6 Reference numbering — `MM-<DEPT>-<YYYY>-<seq>`
+- Assumed format per plan §5.3: `MM-LEA-2026-0001`, approval reference `MM-LEA-2026-0001-APR`.
+- Sequence resets per department per year; generation is transactional (no duplicates under concurrency).
+- Unconfirmed: whether Massy has an existing PO series the reference must align or interleave with.
+- `TODO(client)` — confirm numbering alignment (plan §9 Q10).
+
+### 2.7 Emergency purchases — not built in Phase 0
+- No break-glass purchase path exists. This is a deliberate deferral, not an omission: plan §9 Q9 requires it to be designed deliberately (retrospective 24 h approval, permanent flag, monthly report) or people will route around the app.
+- `TODO(client)` — decide whether the path is wanted and its rules (plan §9 Q9).
+
+### 2.8 CDK — reference fields + Excel export only
+- Per plan §6.5: no live integration. Reference fields captured; Accounting batch export produced in CDK's expected column layout.
+- Unknown and blocking Phase 2: CDK product/edition, hosting model, whether an API integration platform is licensed, whether the contract permits integration, and who owns the vendor relationship.
+- `TODO(client)` — Massy IT to answer the three questions in plan §6.5 (plan §9 Q5).
+
+### 2.9 Entra ID — dev-mode auth stub until app registration granted
+- The Entra ID app registration (redirect URI + Graph permissions) has not yet been granted by Massy IT.
+- Development uses a clearly-marked **auth stub** that mints local test identities. Safeguards: the stub module throws at startup if `NODE_ENV=production` or if a production database DSN is configured; it is excluded from the production build path; its use is logged on every start.
+- All session, RBAC, and audit behaviour is identical under the stub, so nothing downstream changes when real Entra sign-in lands.
+- `TODO(client)` — Massy IT to grant the app registration (plan §2 ask-list item 4, plan §9 Q8). **Go-live blocker.**
+
+### 2.10 Entra disable propagation — bounded, not instantaneous
+- Assumption recorded for auditor clarity: when IT disables a user in Entra ID, that user is locked out of this app at the **next token validation or session idle timeout — a maximum of 30 minutes** (the A.8.5 idle timeout) — not mid-request.
+- Immediate revocation, when needed faster, is achieved in-app: revoking the user's role assignments takes effect **within one request** (A.5.18), and an admin can terminate active sessions.
+- `TODO(client)` — confirm this propagation window is acceptable to Massy IT security, or fund session-revocation-on-Entra-webhook work.
+
+### 2.11 Remote access path — undecided, flagged
+- Neither VPN nor Entra Private Access has been chosen. The app assumes nothing; both options terminate at the same internal 443 listener. If Entra Private Access is chosen, the Conditional Access policy is a **required deliverable** (plan §2), owned jointly with Massy IT.
+- `TODO(client)` — decide before go-live (plan §9 Q11).
+
+### 2.12 Power BI hosting — undecided, flagged
+- Cloud Service vs on-prem Report Server undecided. Reporting schema and masked views (A.8.11) are built the same either way; the choice only changes where data flows and whether an A.5.23 cloud-service assessment is triggered.
+- `TODO(client)` — decide, tied to Q7 (plan §9 Q12).
+
+### 2.13 Schema additions beyond plan §4 — `sessions` and `login_banner_acks`
+- Two tables were added that do not appear in plan §4: **`sessions`** (server-side session records: hashed token, user, created/last-seen timestamps, idle and absolute expiry, revocation) and **`login_banner_acks`** (per-user record of acceptable-use banner acknowledgement: user, banner version, timestamp).
+- These are **operational necessities, not scope creep**: A.8.5 requires enforceable 30-minute idle / 8-hour absolute session timeouts and immediate revocation, which requires server-side session state; A.5.10 requires the banner acknowledgement to be *recorded* and its acceptance test requires a fresh user to acknowledge before reaching any data.
+- Recorded here so the deviation from §4 is explicit and reviewable. No other tables were added.
+
+### 2.14 Supabase — disposable dev/test database only
+- A Supabase-hosted cloud Postgres instance is used **only** as a disposable development/test database, containing **synthetic data only** (A.8.33 — no production data ever exists to copy, and none will be copied when it does).
+- Production is **on-prem PostgreSQL 16** per plan §2. The Supabase project will be **decommissioned before go-live** and is listed in `/docs/THIRD-PARTIES.md` with that status.
+- No production secret, hostname, or credential is shared with the Supabase environment (A.8.31).
+
+---
+
+## 3. Resolved assumptions
+
+*None yet. When a client answer arrives: record the answer, the date, who gave it, move the entry here, and update the affected code/config and `/docs/CONTROL-MATRIX.md` in the same change.*

@@ -1,0 +1,19 @@
+{
+  "name": "Massy Purchasing",
+  "short_name": "Purchasing",
+  "description": "Massy Motors purchase requisition and approval logbook. Authorised personnel only.",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f8fafc",
+  "theme_color": "#1e293b",
+  "icons": [
+    {
+      "src": "/icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
