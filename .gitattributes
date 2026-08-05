@@ -1,0 +1,9 @@
+# Normalise line endings so file fingerprints (e.g. the migration ledger's
+# SHA-256, A.8.32) agree across Windows and Linux checkouts.
+* text=auto
+*.sql text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.md text eol=lf

@@ -21,6 +21,12 @@ const schema = z
     ENTRA_CLIENT_SECRET: z.string().optional(),
     OIDC_REDIRECT_URI: z.string().url().optional(),
     WEB_DIST_DIR: z.string().optional(),
+    // Never blindly trust X-Forwarded-For: a spoofable client IP defeats every
+    // rate limit and falsifies audit rows. 'false' (direct listen), an integer
+    // hop count, or a comma-separated proxy CIDR/IP list.
+    TRUST_PROXY: z.string().default('false'),
+    // Optional CA bundle path enabling verified TLS to PostgreSQL (A.8.24)
+    DB_SSL_CA_FILE: z.string().optional(),
     LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error']).default('info'),
   })
   .superRefine((env, ctx) => {
@@ -44,13 +50,34 @@ const schema = z
         }
       }
     }
+    // A.5.14/A.8.24: production must be served over HTTPS — the Secure cookie
+    // flag and HSTS are meaningless otherwise.
+    if (env.NODE_ENV === 'production' && !env.APP_BASE_URL.startsWith('https://')) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'APP_BASE_URL must be https:// in production',
+        path: ['APP_BASE_URL'],
+      });
+    }
   });
 
 export type Config = z.infer<typeof schema> & {
   /** Session policy per A.8.5 */
   session: { idleMinutes: number; absoluteHours: number };
   bannerVersion: number;
+  /** Parsed TRUST_PROXY: false, a hop count, or a proxy address list. */
+  trustProxy: boolean | number | string[];
 };
+
+function parseTrustProxy(raw: string): boolean | number | string[] {
+  if (raw === 'false' || raw === '') return false;
+  if (raw === 'true') {
+    // 'true' would trust any client-supplied X-Forwarded-For — refuse it.
+    throw new Error('TRUST_PROXY=true is not allowed: list the proxy addresses/CIDRs or a hop count instead');
+  }
+  if (/^\d+$/.test(raw)) return Number(raw);
+  return raw.split(',').map((s) => s.trim()).filter(Boolean);
+}
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const parsed = schema.safeParse(env);
@@ -64,5 +91,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     session: { idleMinutes: 30, absoluteHours: 8 },
     // Bump when the acceptable-use text changes; users re-acknowledge (A.5.10).
     bannerVersion: 1,
+    trustProxy: parseTrustProxy(parsed.data.TRUST_PROXY),
   };
 }

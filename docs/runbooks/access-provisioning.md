@@ -78,20 +78,20 @@ Verification: user's session is terminated; role list for the user shows all row
 
 Cadence: every calendar quarter, and on demand for audit.
 
-1. System Admin → Admin → Access review → Export. The export lists **every user** with: status
-   (active/inactive), each role, each cost centre, `granted_by`/`granted_at`/reason, `revoked_at`
-   where set, and **last login** (UTC).
-2. The export is itself audit-logged (who exported, when, row count — A.8.12) and carries the
-   classification label (A.5.13).
+1. A System Admin or Auditor downloads `GET /api/admin/access-review.xlsx` (shipped in Phase 0;
+   the Admin-screen button arrives with the admin UI). The export lists **every user** with:
+   status, each live role, each cost centre, `granted_by`/`granted_at`/reason, and
+   **last login** (UTC). Revoked-grant history, if the reviewer requests it, comes from the
+   auditor's audit-log view (`role.revoked` entries).
+2. The export is itself audit-logged (who exported, when, row count — A.8.12), rate-limited, and
+   carries the classification label block on page 1 (A.5.13).
 3. Send to the reviewing manager per cost centre and the application owner. Each reviewer confirms
    every listed right is still required, or names the revocations needed.
 4. Execute revocations per Mover step 2 within 5 business days. `TODO(client)` — confirm the SLA.
 5. File the export + reviewer confirmations in the compliance evidence store
    (`TODO(client)` — location) — this is the A.5.18/A.5.36 evidence pack.
 
-*(Until the export feature ships in Phase 4, the interim source is a read-only SQL query over
-`users` + `roles_assignments` + session last-seen, run by the DBA and delivered as a dated file —
-the review itself must not wait for the feature.)*
+*(The export endpoint is live as of Phase 0 — no interim DBA query is needed.)*
 
 ## Break-glass account (A.5.16, A.5.17)
 

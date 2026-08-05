@@ -47,6 +47,7 @@ try {
     ).rows[0]!.id;
 
   const andre = await user('andre.sysadmin', 'Andre Williams', 'IT Systems Administrator');
+  const fiona = await user('fiona.fd', 'Fiona Ramlogan', 'Finance Director');
   const riya = await user('riya.requester', 'Riya Maharaj', 'Leasing Coordinator');
   const kerry = await user('kerry.requester', 'Kerry Ali', 'Administrative Assistant');
   const devon = await user('devon.manager', 'Devon Charles', 'Department Manager');
@@ -101,12 +102,14 @@ try {
   );
 
   // ── DOA matrix v1 (draft content — real DOA is TODO(client), §9 Q1) ──────
-  // Uploaded by the DOA admin, activated by a second person (two-person rule §6.1).
+  // Uploaded by the DOA admin, activated by a second person (two-person rule
+  // §6.1). The activator (Finance Director) holds NO approver role: §3 —
+  // nobody can activate the DOA and approve against the same version.
   const doaVersion = (
     await client.query<{ id: string }>(
       `INSERT INTO doa_matrix_versions (version_no, status, effective_from, uploaded_by, approved_by, approved_at)
        VALUES (1, 'active', now(), $1, $2, now()) RETURNING id`,
-      [nigel, anjali],
+      [nigel, fiona],
     )
   ).rows[0]!.id;
 

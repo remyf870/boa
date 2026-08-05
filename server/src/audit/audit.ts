@@ -57,18 +57,29 @@ export async function writeAudit(db: Queryable, entry: AuditEntry): Promise<void
 export interface ChainVerification {
   ok: boolean;
   totalRows: number;
+  /** Anchor for external attestation (forward to SIEM): tip of the verified chain. */
+  maxSeq: string | null;
+  tipHash: string | null;
   defects: { seq: string; problem: string }[];
 }
 
-/** Full-chain verification (A.8.15 / A.5.28). Zero defects = intact. */
+/**
+ * Full-chain verification (A.8.15 / A.5.28). Zero defects = intact. Uses the
+ * SECURITY DEFINER functions from migration 0003, so the result covers the
+ * whole table regardless of the caller's RLS visibility.
+ */
 export async function verifyAuditChain(db: Queryable): Promise<ChainVerification> {
-  const total = await db.query<{ n: string }>('SELECT count(*)::text AS n FROM audit_log');
+  const anchor = await db.query<{ total_rows: string; max_seq: string | null; tip_hash: string | null }>(
+    'SELECT total_rows::text, max_seq::text, tip_hash FROM audit_chain_anchor()',
+  );
   const defects = await db.query<{ seq: string; problem: string }>(
     'SELECT seq::text, problem FROM audit_chain_defects()',
   );
   return {
     ok: defects.rows.length === 0,
-    totalRows: Number(total.rows[0]?.n ?? 0),
+    totalRows: Number(anchor.rows[0]?.total_rows ?? 0),
+    maxSeq: anchor.rows[0]?.max_seq ?? null,
+    tipHash: anchor.rows[0]?.tip_hash ?? null,
     defects: defects.rows,
   };
 }

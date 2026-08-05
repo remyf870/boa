@@ -27,6 +27,10 @@ const BANNER_EXEMPT = new Set([
   '/api/me/acknowledge-banner',
 ]);
 
+/** The ONLY /api paths reachable without a session (A.5.15 default-deny). */
+const PUBLIC_PATHS = new Set(['/api/health']);
+const PUBLIC_PREFIXES = ['/api/auth/'];
+
 const CSRF_SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 export default fp(async function authContext(
@@ -51,6 +55,23 @@ export default fp(async function authContext(
     } else {
       req.currentUser = null;
       req.sessionFailure = result.failure === 'no_session' ? null : result.failure;
+    }
+
+    // A.5.15 default-deny, enforced at the framework layer: every /api path is
+    // authenticated unless explicitly listed public above. A future route that
+    // forgets its requireAuth()/requireRoles() guard is still not reachable
+    // anonymously.
+    const path = req.url.split('?')[0] ?? '';
+    if (
+      !req.currentUser &&
+      path.startsWith('/api/') &&
+      !PUBLIC_PATHS.has(path) &&
+      !PUBLIC_PREFIXES.some((p) => path.startsWith(p))
+    ) {
+      return reply.code(401).send({
+        error: 'unauthenticated',
+        ...(req.sessionFailure ? { reason: req.sessionFailure } : {}),
+      });
     }
 
     // CSRF: state-changing requests with a session must present the session's

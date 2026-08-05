@@ -2,12 +2,26 @@
 --
 --   row_hash = SHA256(prev_hash || canonical row contents)
 --
--- The canonicalisation lives in ONE immutable SQL function used by both the
--- insert trigger and the verification job, so there is exactly one definition
--- of what gets hashed. Genesis prev_hash is 64 zero characters.
+-- Design notes (chain format v2):
+--  * Canonicalisation is length-prefixed per field ('n' for NULL, else
+--    '<byte-length>:<value>'), so no field content can forge an alternative
+--    split of the canonical string (delimiter-injection proof).
+--  * seq is allocated INSIDE the advisory-locked region by the trigger, so
+--    chain order and seq order can never diverge under concurrency.
+--  * The trigger and verification functions are SECURITY DEFINER: they must
+--    see the whole table regardless of the caller's RLS visibility, otherwise
+--    a non-auditor writer would chain onto a genesis hash it cannot see past.
+--  * Honest limit (documented in docs/CRYPTO.md): the chain is tamper-EVIDENT,
+--    not tamper-proof against a database superuser who disables triggers and
+--    recomputes hashes or truncates the tail. Mitigations: least-privilege
+--    grants (0005), and the verification job emits an anchor (max seq + tip
+--    hash + row count) to the SIEM so recomputation/truncation is detectable
+--    against external state.
+
+CREATE SEQUENCE audit_log_seq;
 
 CREATE TABLE audit_log (
-  seq            bigserial PRIMARY KEY,
+  seq            bigint PRIMARY KEY, -- assigned by the chain trigger, never by callers
   occurred_at    timestamptz NOT NULL DEFAULT now(), -- UTC per A.8.17
   actor_user_id  uuid REFERENCES users (id),         -- NULL for unauthenticated events (e.g. failed logins)
   action         text NOT NULL,
@@ -20,12 +34,19 @@ CREATE TABLE audit_log (
   prev_hash      char(64) NOT NULL,
   row_hash       char(64) NOT NULL
 );
+ALTER SEQUENCE audit_log_seq OWNED BY audit_log.seq;
 CREATE INDEX audit_log_occurred_ix ON audit_log (occurred_at);
 CREATE INDEX audit_log_actor_ix ON audit_log (actor_user_id);
 CREATE INDEX audit_log_action_ix ON audit_log (action);
 
--- Deterministic canonical form of one audit row (timezone-independent: the
--- timestamp is rendered explicitly at UTC; jsonb text output is normalised).
+-- Unambiguous encoding of one nullable text field
+CREATE FUNCTION audit_canonical_field(p text) RETURNS text
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE WHEN p IS NULL THEN 'n' ELSE octet_length(p)::text || ':' || p END;
+$$;
+
+-- Deterministic canonical form of one audit row (timestamp rendered at UTC;
+-- jsonb text output is normalised by Postgres).
 CREATE FUNCTION audit_row_canonical(
   p_seq bigint,
   p_occurred_at timestamptz,
@@ -39,25 +60,29 @@ CREATE FUNCTION audit_row_canonical(
   p_user_agent text
 ) RETURNS text
 LANGUAGE sql IMMUTABLE AS $$
-  SELECT p_seq::text
-    || '|' || to_char(p_occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
-    || '|' || coalesce(p_actor_user_id::text, '')
-    || '|' || p_action
-    || '|' || p_entity_type
-    || '|' || coalesce(p_entity_id, '')
-    || '|' || coalesce(p_before::text, '')
-    || '|' || coalesce(p_after::text, '')
-    || '|' || coalesce(p_ip_address::text, '')
-    || '|' || coalesce(p_user_agent, '');
+  SELECT audit_canonical_field(p_seq::text)
+    || '|' || audit_canonical_field(to_char(p_occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'))
+    || '|' || audit_canonical_field(p_actor_user_id::text)
+    || '|' || audit_canonical_field(p_action)
+    || '|' || audit_canonical_field(p_entity_type)
+    || '|' || audit_canonical_field(p_entity_id)
+    || '|' || audit_canonical_field(p_before::text)
+    || '|' || audit_canonical_field(p_after::text)
+    || '|' || audit_canonical_field(p_ip_address::text)
+    || '|' || audit_canonical_field(p_user_agent);
 $$;
 
+-- SECURITY DEFINER: the tip lookup and seq allocation must ignore the
+-- caller's RLS visibility. search_path pinned per SECURITY DEFINER hygiene.
 CREATE FUNCTION audit_log_hash_chain() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_catalog AS $$
 DECLARE
   last_hash char(64);
 BEGIN
-  -- Serialise chain extension: concurrent inserts must not read the same tip.
+  -- Serialise chain extension; seq is allocated inside the lock so chain
+  -- order == seq order, always.
   PERFORM pg_advisory_xact_lock(hashtext('audit_log_chain'));
+  NEW.seq := nextval('audit_log_seq');
 
   SELECT row_hash INTO last_hash FROM audit_log ORDER BY seq DESC LIMIT 1;
   IF last_hash IS NULL THEN
@@ -104,12 +129,12 @@ CREATE TRIGGER audit_log_no_truncate_tg
   BEFORE TRUNCATE ON audit_log
   FOR EACH STATEMENT EXECUTE FUNCTION reject_truncate();
 
--- Full-chain verification in one deterministic SQL pass. Returns bad rows;
--- zero rows = chain intact. Used by `npm run verify-audit-chain` (A.8.16 alert
--- source) and by the A.5.28 evidence export.
+-- Full-chain verification in one deterministic SQL pass. SECURITY DEFINER so
+-- the verification jobs and the auditor API see the whole chain regardless of
+-- RLS; returns only (seq, problem) - no payloads leak. Zero rows = intact.
 CREATE FUNCTION audit_chain_defects()
 RETURNS TABLE (seq bigint, problem text)
-LANGUAGE sql STABLE AS $$
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_catalog AS $$
   WITH chained AS (
     SELECT a.seq, a.prev_hash, a.row_hash,
       lag(a.row_hash) OVER (ORDER BY a.seq) AS expected_prev,
@@ -129,4 +154,14 @@ LANGUAGE sql STABLE AS $$
   WHERE c.row_hash <> c.expected_hash
      OR coalesce(c.expected_prev, repeat('0', 64)) <> c.prev_hash
   ORDER BY c.seq;
+$$;
+
+-- Chain anchor for external attestation: the verification job forwards this to
+-- the SIEM so tail-truncation or full recomputation is detectable against
+-- externally retained state (see docs/CRYPTO.md section 3).
+CREATE FUNCTION audit_chain_anchor()
+RETURNS TABLE (total_rows bigint, max_seq bigint, tip_hash char(64))
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_catalog AS $$
+  SELECT count(*), max(seq), (SELECT row_hash FROM audit_log ORDER BY seq DESC LIMIT 1)
+  FROM audit_log;
 $$;

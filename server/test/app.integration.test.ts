@@ -1,6 +1,7 @@
 // HTTP-level compliance gates (§8.1) exercised through the real Fastify app
 // with the dev auth stub. Requires DATABASE_URL (CI: disposable PostgreSQL 16).
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import ExcelJS from 'exceljs';
 import type { FastifyInstance } from 'fastify';
 import type pg from 'pg';
 import { buildApp } from '../src/app.js';
@@ -146,6 +147,18 @@ describe.skipIf(!TEST_DATABASE_URL)('application compliance gates', () => {
     expect(alert.rows.length).toBeGreaterThan(0);
   });
 
+  it('A.5.15/A.8.2: an org-wide role cannot be granted scoped to a cost centre', async () => {
+    const s = await loginAs(actors.sysadmin);
+    await acknowledgeBanner(s);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/admin/users/${actors.otherRequester}/roles`,
+      headers: { cookie: s.cookie, 'x-csrf-token': s.csrf },
+      payload: { role: 'auditor', costCentreId: actors.ccLea, reason: 'scoped auditor attempt' },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
   it('A.5.3: granting a conflicting role via the API returns 409 with an audit entry', async () => {
     const s = await loginAs(actors.sysadmin);
     await acknowledgeBanner(s);
@@ -158,17 +171,25 @@ describe.skipIf(!TEST_DATABASE_URL)('application compliance gates', () => {
     });
     expect(res.statusCode).toBe(409);
     expect((res.json() as { error: string }).error).toBe('segregation_of_duties_conflict');
+
+    // the refusal itself is an audit entry (A.5.3 acceptance: "…and an audit entry")
+    const audit = await db.query(
+      `SELECT 1 FROM audit_log
+       WHERE action = 'role.grant_refused' AND actor_user_id = $1 AND after->>'reason' = 'sod_conflict'`,
+      [actors.sysadmin],
+    );
+    expect(audit.rows.length).toBeGreaterThan(0);
   });
 
   it('A.5.18: role grant and revocation round-trip, revocation effective within one request', async () => {
     const s = await loginAs(actors.sysadmin);
     await acknowledgeBanner(s);
-    // grant otherRequester a requester role in LEA
+    // grant otherRequester an approver role in LEA (approvers read their cost centre, §3)
     const grantRes = await app.inject({
       method: 'POST',
       url: `/api/admin/users/${actors.otherRequester}/roles`,
       headers: { cookie: s.cookie, 'x-csrf-token': s.csrf },
-      payload: { role: 'requester', costCentreId: actors.ccLea, reason: 'access review test' },
+      payload: { role: 'approver', costCentreId: actors.ccLea, reason: 'access review test' },
     });
     expect(grantRes.statusCode).toBe(200);
     const { assignmentId } = grantRes.json() as { assignmentId: string };
@@ -238,7 +259,30 @@ describe.skipIf(!TEST_DATABASE_URL)('application compliance gates', () => {
     expect((res.json() as { reason?: string }).reason).toBe('expired_idle');
   });
 
-  it('A.5.18/A.5.13/A.8.12: the access review export works, is labelled, and is audited with row count', async () => {
+  it('A.8.5: the 8-hour absolute limit expires a session regardless of activity', async () => {
+    const s = await loginAs(actors.requester);
+    await db.query(
+      `UPDATE sessions SET absolute_expires_at = now() - interval '1 minute'
+       WHERE user_id = $1 AND revoked_at IS NULL`,
+      [actors.requester],
+    );
+    const res = await app.inject({ method: 'GET', url: '/api/me', headers: { cookie: s.cookie } });
+    expect(res.statusCode).toBe(401);
+    expect((res.json() as { reason?: string }).reason).toBe('expired_absolute');
+  });
+
+  it('A.5.33: the API exposes no DELETE surface for records', async () => {
+    const s = await loginAs(actors.requester);
+    await acknowledgeBanner(s);
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/api/requisitions/${actors.leaRequisition}`,
+      headers: { cookie: s.cookie, 'x-csrf-token': s.csrf },
+    });
+    expect(res.statusCode).toBe(404); // no such route exists, by design
+  });
+
+  it('A.5.18/A.5.13/A.8.12: the access review export works, is labelled on page 1, and is audited with row count', async () => {
     const s = await loginAs(actors.sysadmin);
     await acknowledgeBanner(s);
     const res = await app.inject({
@@ -248,7 +292,16 @@ describe.skipIf(!TEST_DATABASE_URL)('application compliance gates', () => {
     });
     expect(res.statusCode).toBe(200);
     expect(res.headers['content-type']).toContain('spreadsheetml');
-    expect(res.rawPayload.length).toBeGreaterThan(1000);
+
+    // A.5.13: open the workbook — label block must be the first thing on page 1
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(res.rawPayload as unknown as ArrayBuffer);
+    const ws = wb.worksheets[0]!;
+    expect(String(ws.getCell('A1').value)).toBe('Classification: Internal');
+    expect(String(ws.getCell('A2').value)).toContain('Exported by:');
+    expect(String(ws.getCell('A3').value)).toContain('Exported at (UTC):');
+    expect(String(ws.getCell('A4').value)).toContain('Filter:');
+    expect(String(ws.getCell('A5').value)).toContain('Rows:');
 
     const audit = await db.query<{ after: { rowCount: number } }>(
       `SELECT after FROM audit_log
@@ -258,6 +311,42 @@ describe.skipIf(!TEST_DATABASE_URL)('application compliance gates', () => {
     );
     expect(audit.rows.length).toBe(1);
     expect(audit.rows[0]!.after.rowCount).toBeGreaterThan(0);
+  });
+
+  it('A.8.12: three exports produce three audit entries; the export rate limit engages', async () => {
+    // Fresh app instance → fresh rate-limit counters, isolated from other tests
+    const app2 = await buildApp(testConfig(), db);
+    try {
+      const login = await app2.inject({ method: 'GET', url: `/api/auth/dev-login?userId=${actors.sysadmin}` });
+      const raw = ([] as string[]).concat(login.headers['set-cookie'] ?? []).find((c) => c.startsWith('msid='));
+      const cookie = raw!.split(';')[0]!;
+
+      const before = await db.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM audit_log
+         WHERE action = 'data.export' AND entity_id = 'access-review' AND actor_user_id = $1`,
+        [actors.sysadmin],
+      );
+      for (let i = 0; i < 3; i++) {
+        const res = await app2.inject({ method: 'GET', url: '/api/admin/access-review.xlsx', headers: { cookie } });
+        expect(res.statusCode).toBe(200);
+      }
+      const after = await db.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM audit_log
+         WHERE action = 'data.export' AND entity_id = 'access-review' AND actor_user_id = $1`,
+        [actors.sysadmin],
+      );
+      expect(Number(after.rows[0]!.n) - Number(before.rows[0]!.n)).toBe(3); // one entry per export, every time
+
+      // 10/hour per-route cap: the 11th request inside the hour is refused
+      let lastStatus = 200;
+      for (let i = 0; i < 8; i++) {
+        const res = await app2.inject({ method: 'GET', url: '/api/admin/access-review.xlsx', headers: { cookie } });
+        lastStatus = res.statusCode;
+      }
+      expect(lastStatus).toBe(429);
+    } finally {
+      await app2.close();
+    }
   });
 
   it('A.8.15: the auditor can read and verify the audit chain via the API; others cannot', async () => {

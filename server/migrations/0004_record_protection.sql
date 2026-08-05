@@ -139,6 +139,32 @@ CREATE TRIGGER roles_assignments_sod_tg
   BEFORE INSERT OR UPDATE ON roles_assignments
   FOR EACH ROW EXECUTE FUNCTION enforce_sod_on_role_grant();
 
+-- Attachment evidence is immutable once written: the stored bytes' identity
+-- (sha256, storage_key, size, name, type, uploader) can never be re-pointed.
+-- Only scan_status and classification may change (the scanner pipeline, A.8.7).
+CREATE FUNCTION attachments_evidence_frozen() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.filename <> OLD.filename
+     OR NEW.content_type <> OLD.content_type
+     OR NEW.size_bytes <> OLD.size_bytes
+     OR NEW.sha256 <> OLD.sha256
+     OR NEW.storage_key <> OLD.storage_key
+     OR NEW.uploaded_by <> OLD.uploaded_by
+     OR NEW.uploaded_at <> OLD.uploaded_at
+     OR coalesce(NEW.requisition_id::text, '') <> coalesce(OLD.requisition_id::text, '')
+     OR NEW.type <> OLD.type THEN
+    RAISE EXCEPTION 'attachment evidence fields are immutable (A.5.33 / A.8.7)'
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER attachments_evidence_frozen_tg
+  BEFORE UPDATE ON attachments
+  FOR EACH ROW EXECUTE FUNCTION attachments_evidence_frozen();
+
 -- section 5.3 / section 4: atomic, gap-free requisition reference issuance
 CREATE FUNCTION next_reference(p_prefix text, p_year integer)
 RETURNS text

@@ -135,25 +135,74 @@ describe.skipIf(!TEST_DATABASE_URL)('database compliance gates', () => {
     ).rejects.toThrow(/denial_requires_reason/);
   });
 
-  it('A.5.34: the schema holds no supplier bank/payment fields', async () => {
-    const { rows } = await db.query(
-      `SELECT column_name FROM information_schema.columns
-       WHERE table_name = 'suppliers'
-         AND (column_name ILIKE '%bank%' OR column_name ILIKE '%iban%'
-              OR column_name ILIKE '%account_no%' OR column_name ILIKE '%payment%')`,
-    );
-    expect(rows).toHaveLength(0);
-  });
-
-  it('A.8.17: every timestamp column is timestamptz — no naive local times', async () => {
+  it('A.5.34: no bank/payment fields exist anywhere in the schema', async () => {
     const { rows } = await db.query(
       `SELECT table_name, column_name FROM information_schema.columns
        WHERE table_schema = current_schema()
-         AND data_type = 'timestamp without time zone'
-         AND table_name IN ('users','roles_assignments','cost_centres','categories','suppliers','budgets',
-                            'doa_matrix_versions','doa_rules','requisitions','approval_steps','attachments',
-                            'invoices','audit_log','sessions','alerts','break_glass_account','schema_migrations')`,
+         AND (column_name ILIKE '%bank%' OR column_name ILIKE '%iban%' OR column_name ILIKE '%swift%'
+              OR column_name ILIKE '%routing%' OR column_name ILIKE '%sort_code%'
+              OR column_name ILIKE '%beneficiary%' OR column_name ILIKE '%card%'
+              OR column_name ILIKE '%account_no%' OR column_name ILIKE '%payment%')`,
     );
     expect(rows).toEqual([]);
+  });
+
+  it('A.8.17: every timestamp column in the schema is timestamptz — no naive local times', async () => {
+    // Schema-wide: any future table with a naive timestamp fails this too
+    const { rows } = await db.query(
+      `SELECT table_name, column_name FROM information_schema.columns
+       WHERE table_schema = current_schema()
+         AND data_type = 'timestamp without time zone'`,
+    );
+    expect(rows).toEqual([]);
+  });
+
+  it('A.5.12: classification columns exist with the mandated defaults', async () => {
+    const { rows } = await db.query<{ table_name: string; column_default: string }>(
+      `SELECT table_name, column_default FROM information_schema.columns
+       WHERE table_schema = current_schema() AND column_name = 'classification'
+       ORDER BY table_name`,
+    );
+    const byTable = new Map(rows.map((r) => [r.table_name, r.column_default]));
+    expect(byTable.get('requisitions')).toContain('internal');
+    expect(byTable.get('invoices')).toContain('confidential'); // invoices are Confidential per §8.1
+    expect(byTable.get('attachments')).toContain('internal');
+  });
+
+  it('A.8.3/A.5.33: connected as the massy_app role, RLS scopes rows and DELETE is impossible', async () => {
+    await db.query('GRANT massy_app TO current_user');
+    const client = await db.connect();
+    try {
+      await client.query('SET ROLE massy_app');
+
+      // no acting user → zero rows (default-deny at the database itself)
+      await client.query(`SELECT set_config('app.user_id', '', false)`);
+      const anonymous = await client.query('SELECT count(*)::int AS n FROM requisitions');
+      expect(anonymous.rows[0].n).toBe(0);
+
+      // as the LEA requester: own requisition visible, the ADM one invisible
+      await client.query(`SELECT set_config('app.user_id', $1, false)`, [actors.requester]);
+      const own = await client.query('SELECT EXISTS (SELECT 1 FROM requisitions WHERE id = $1) AS v', [
+        actors.leaRequisition,
+      ]);
+      const foreign = await client.query('SELECT EXISTS (SELECT 1 FROM requisitions WHERE id = $1) AS v', [
+        actors.admRequisition,
+      ]);
+      expect(own.rows[0].v).toBe(true);
+      expect(foreign.rows[0].v).toBe(false);
+
+      // a non-auditor cannot read audit detail even with direct SQL
+      const audit = await client.query('SELECT count(*)::int AS n FROM audit_log');
+      expect(audit.rows[0].n).toBe(0);
+
+      // the app role holds no DELETE grant on records (A.5.33)
+      await expect(client.query('DELETE FROM requisitions WHERE id = $1', [actors.leaRequisition])).rejects.toThrow(
+        /permission denied|not permitted/,
+      );
+    } finally {
+      await client.query('RESET ROLE').catch(() => undefined);
+      await client.query(`SELECT set_config('app.user_id', '', false)`).catch(() => undefined);
+      client.release();
+    }
   });
 });

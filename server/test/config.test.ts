@@ -30,6 +30,7 @@ describe('config (A.8.9 fail-fast, A.5.16 production auth)', () => {
     const cfg = loadConfig({
       ...base,
       NODE_ENV: 'production',
+      APP_BASE_URL: 'https://purchasing.massymotors.local',
       AUTH_MODE: 'entra',
       ENTRA_TENANT_ID: 't',
       ENTRA_CLIENT_ID: 'c',
@@ -41,5 +42,26 @@ describe('config (A.8.9 fail-fast, A.5.16 production auth)', () => {
 
   it('rejects weak session secrets', () => {
     expect(() => loadConfig({ ...base, SESSION_SECRET: 'short' })).toThrow(/64 hex/);
+  });
+
+  it('rejects plain-http APP_BASE_URL in production (A.5.14)', () => {
+    expect(() =>
+      loadConfig({
+        ...base,
+        NODE_ENV: 'production',
+        AUTH_MODE: 'entra',
+        ENTRA_TENANT_ID: 't',
+        ENTRA_CLIENT_ID: 'c',
+        ENTRA_CLIENT_SECRET: 's',
+        OIDC_REDIRECT_URI: 'https://x/api/auth/callback',
+      }),
+    ).toThrow(/https/);
+  });
+
+  it('refuses TRUST_PROXY=true — proxies must be named explicitly', () => {
+    expect(() => loadConfig({ ...base, TRUST_PROXY: 'true' })).toThrow(/TRUST_PROXY/);
+    expect(loadConfig({ ...base, TRUST_PROXY: '1' }).trustProxy).toBe(1);
+    expect(loadConfig({ ...base, TRUST_PROXY: '10.0.0.1,10.0.0.2' }).trustProxy).toEqual(['10.0.0.1', '10.0.0.2']);
+    expect(loadConfig({ ...base }).trustProxy).toBe(false);
   });
 });

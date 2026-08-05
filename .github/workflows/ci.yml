@@ -48,18 +48,16 @@ jobs:
       NODE_ENV: test
       DATABASE_URL: postgres://massy_test:massy_test@localhost:5432/massy_test
       # --- TEST-ONLY STUB VALUES (A.8.9 / A.8.31) -------------------------
-      # These are deliberately fake, low-entropy, CI-only values. They are
-      # NOT secrets and must never resemble real ones. Real secrets live only
-      # in the production secret store (Key Vault / DPAPI per plan §2) and
-      # are never present in this repository or in CI for test runs.
-      # SESSION_SECRET is a clearly-fake 64-character test value.
-      SESSION_SECRET: ci-only-fake-session-secret-000000000000000000000000000000000000
-      # Entra ID OIDC stubs — auth is mocked/stubbed under NODE_ENV=test.
-      # TODO(client): align variable names with server config module if they drift.
-      ENTRA_TENANT_ID: 00000000-0000-0000-0000-000000000000
-      ENTRA_CLIENT_ID: 00000000-0000-0000-0000-000000000000
-      ENTRA_CLIENT_SECRET: ci-only-fake-entra-client-secret-not-a-real-credential
-      APP_BASE_URL: http://localhost:3000
+      # These are deliberately fake, CI-only values matching the exact shape
+      # server/src/config.ts validates (64 hex chars for the two keys). They
+      # are NOT secrets. Real secrets live only in the production secret
+      # store (Key Vault / DPAPI per plan §2), never in this repo or CI.
+      SESSION_SECRET: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      BREAK_GLASS_KEY: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      # Tests authenticate through the dev stub (refused in production by
+      # config validation) — no Entra values are needed or present in CI.
+      AUTH_MODE: dev
+      APP_BASE_URL: http://localhost:3001
       # --------------------------------------------------------------------
     steps:
       - name: Checkout

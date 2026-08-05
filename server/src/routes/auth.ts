@@ -12,9 +12,15 @@ import { requireAuth } from '../plugins/rbac.js';
 
 const OIDC_FLOW_COOKIE = 'oidc_flow';
 
+const escapeHtml = (s: string) =>
+  s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+
 export default async function authRoutes(app: FastifyInstance, opts: { db: Db; config: Config }) {
   const { db, config } = opts;
-  const secureCookies = config.NODE_ENV === 'production';
+  // Derived from the deployment URL, not just NODE_ENV: a production deploy
+  // with NODE_ENV unset must still mark its cookies Secure.
+  const secureCookies =
+    config.NODE_ENV === 'production' || new URL(config.APP_BASE_URL).protocol === 'https:';
 
   const sessionCookieOpts = {
     httpOnly: true,
@@ -60,7 +66,7 @@ export default async function authRoutes(app: FastifyInstance, opts: { db: Db; c
       const items = users.rows
         .map(
           (u) =>
-            `<li><a href="/api/auth/dev-login?userId=${encodeURIComponent(u.id)}">${u.display_name} &lt;${u.email}&gt;</a></li>`,
+            `<li><a href="/api/auth/dev-login?userId=${encodeURIComponent(u.id)}">${escapeHtml(u.display_name)} &lt;${escapeHtml(u.email)}&gt;</a></li>`,
         )
         .join('');
       return reply.type('text/html').send(

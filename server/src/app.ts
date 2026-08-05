@@ -23,7 +23,10 @@ export async function buildApp(config: Config, db: Db): Promise<FastifyInstance>
       redact: ['req.headers.cookie', 'req.headers.authorization'],
       ...(config.NODE_ENV === 'development' ? { transport: { target: 'pino-pretty' } } : {}),
     },
-    trustProxy: true,
+    // Configured per environment (config.ts): never blanket-trust
+    // X-Forwarded-For — a spoofable req.ip defeats rate limits and falsifies
+    // audit rows (adversarial-review finding).
+    trustProxy: config.trustProxy,
     bodyLimit: 1024 * 1024, // 1 MiB JSON bodies; file uploads get their own route + limits in Phase 2
   });
 

@@ -45,6 +45,12 @@ CREATE TABLE roles_assignments (
   CONSTRAINT cost_centre_scoped_roles_need_cost_centre CHECK (
     role NOT IN ('requester', 'approver', 'budget_owner') OR cost_centre_id IS NOT NULL
   ),
+  -- Org-wide roles are org-wide, full stop: a "scoped sysadmin/auditor" grant
+  -- would otherwise satisfy org-wide role checks and confer over-broad access
+  -- (A.5.15, A.8.2 - adversarial review finding).
+  CONSTRAINT org_wide_roles_have_no_cost_centre CHECK (
+    role NOT IN ('sysadmin', 'auditor', 'accounting', 'doa_admin') OR cost_centre_id IS NULL
+  ),
   CONSTRAINT revocation_is_complete CHECK (
     (revoked_at IS NULL AND revoked_by IS NULL AND revoked_reason IS NULL)
     OR (revoked_at IS NOT NULL AND revoked_by IS NOT NULL AND revoked_reason IS NOT NULL)
@@ -181,8 +187,11 @@ CREATE TABLE requisitions (
     status IN ('draft', 'cancelled')
     OR (submitted_at IS NOT NULL AND doa_version_id IS NOT NULL AND doa_rule_snapshot IS NOT NULL)
   ),
+  -- 'cancelled' stays in the list: an approved requisition may be cancelled
+  -- (supplier fell through) and its issued reference is a record that must
+  -- survive the cancellation (A.5.33).
   CONSTRAINT approval_reference_only_when_approved CHECK (
-    approval_reference IS NULL OR status IN ('approved', 'closed')
+    approval_reference IS NULL OR status IN ('approved', 'closed', 'cancelled')
   )
 );
 CREATE INDEX requisitions_cost_centre_ix ON requisitions (cost_centre_id);
@@ -221,7 +230,7 @@ CREATE TABLE invoices (
   id                    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   requisition_id        uuid NOT NULL REFERENCES requisitions (id),
   attachment_id         uuid NOT NULL REFERENCES attachments (id),
-  invoice_no            text NOT NULL,
+  invoice_no            text NOT NULL, -- same supplier invoice recorded twice = paid twice; see UNIQUE below
   invoice_date          date NOT NULL,
   amount                numeric(14,2) NOT NULL CHECK (amount > 0),
   currency              char(3) NOT NULL,
@@ -234,7 +243,8 @@ CREATE TABLE invoices (
   created_at            timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT posted_state_is_complete CHECK (
     status <> 'posted' OR (posted_by IS NOT NULL AND posted_at IS NOT NULL AND cdk_reference IS NOT NULL)
-  )
+  ),
+  UNIQUE (requisition_id, invoice_no)
 );
 CREATE INDEX invoices_requisition_ix ON invoices (requisition_id);
 CREATE INDEX invoices_status_ix ON invoices (status);
@@ -266,6 +276,8 @@ CREATE TABLE break_glass_account (
   enabled              boolean NOT NULL DEFAULT true,
   failed_attempts      integer NOT NULL DEFAULT 0,
   locked_until         timestamptz,
+  -- TOTP replay protection: a code's time step may only be consumed once
+  last_totp_step       bigint,
   last_used_at         timestamptz,
   updated_at           timestamptz NOT NULL DEFAULT now()
 );

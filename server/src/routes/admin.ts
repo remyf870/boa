@@ -5,7 +5,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { Config } from '../config.js';
-import type { Db } from '../db/pool.js';
+import { withUserContext, type Db } from '../db/pool.js';
 import { AuditAction, raiseAlert, verifyAuditChain, writeAudit } from '../audit/audit.js';
 import { buildLabelledWorkbook } from '../exports/excel.js';
 import { requireRoles } from '../plugins/rbac.js';
@@ -78,6 +78,25 @@ export default async function adminRoutes(app: FastifyInstance, opts: { db: Db; 
         role: z.enum(ROLE_VALUES),
         costCentreId: z.string().uuid().nullish(),
         reason: z.string().min(3).max(1000), // A.5.18: the "why" is mandatory
+      })
+      .superRefine((b, ctx) => {
+        // Org-wide roles are org-wide, full stop (mirrors the DB CHECK
+        // org_wide_roles_have_no_cost_centre): a "scoped sysadmin/auditor"
+        // would satisfy org-wide role checks with over-broad effect.
+        if (['sysadmin', 'auditor', 'accounting', 'doa_admin'].includes(b.role) && b.costCentreId) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `${b.role} is an organisation-wide role and cannot be scoped to a cost centre`,
+            path: ['costCentreId'],
+          });
+        }
+        if (['requester', 'approver', 'budget_owner'].includes(b.role) && !b.costCentreId) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `${b.role} must be scoped to a cost centre`,
+            path: ['costCentreId'],
+          });
+        }
       })
       .safeParse(req.body);
     if (!params.success || !body.success) return reply.code(400).send({ error: 'invalid_request' });
@@ -254,22 +273,30 @@ export default async function adminRoutes(app: FastifyInstance, opts: { db: Db; 
       .safeParse(req.query);
     if (!query.success) return reply.code(400).send({ error: 'invalid_request' });
     const { limit, before, action } = query.data;
-    const { rows } = await db.query(
-      `SELECT seq, occurred_at, actor_user_id, action, entity_type, entity_id,
-              before, after, ip_address, user_agent, prev_hash, row_hash
-       FROM audit_log
-       WHERE ($1::bigint IS NULL OR seq < $1)
-         AND ($2::text IS NULL OR action = $2)
-       ORDER BY seq DESC
-       LIMIT $3`,
-      [before ?? null, action ?? null, limit],
-    );
+    // withUserContext so the audit_log RLS policy (auditor-only SELECT, A.8.3)
+    // holds even when the connection runs as the restricted massy_app role.
+    const rows = await withUserContext(db, req.currentUser!.id, async (client) => {
+      const result = await client.query(
+        `SELECT seq, occurred_at, actor_user_id, action, entity_type, entity_id,
+                before, after, ip_address, user_agent, prev_hash, row_hash
+         FROM audit_log
+         WHERE ($1::bigint IS NULL OR seq < $1)
+           AND ($2::text IS NULL OR action = $2)
+         ORDER BY seq DESC
+         LIMIT $3`,
+        [before ?? null, action ?? null, limit],
+      );
+      return result.rows;
+    });
     return { entries: rows };
   });
 
-  app.post('/api/admin/audit-verify', { preHandler: requireRoles(db, 'auditor', 'sysadmin') }, async (req) => {
+  // Auditor only: chain verification reads every audit row, and audit payloads
+  // can contain financial detail the sysadmin must not see (A.8.2). Ops runs
+  // the equivalent verify-audit-chain script as the maintenance role.
+  app.post('/api/admin/audit-verify', { preHandler: requireRoles(db, 'auditor') }, async (req) => {
     const actor = req.currentUser!;
-    const result = await verifyAuditChain(db);
+    const result = await withUserContext(db, actor.id, (client) => verifyAuditChain(client));
     if (result.ok) {
       await writeAudit(db, {
         actorUserId: actor.id,

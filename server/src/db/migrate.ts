@@ -21,15 +21,16 @@ export async function runMigrations(databaseUrl: string, log: (msg: string) => v
   const applied: string[] = [];
   const skipped: string[] = [];
   try {
+    // One migrator at a time — lock BEFORE creating the ledger table
+    // (CREATE TABLE IF NOT EXISTS is not race-safe across two starters)
+    await client.query('SELECT pg_advisory_lock(hashtext($1))', ['massy_migrations']);
+
     await client.query(`
       CREATE TABLE IF NOT EXISTS schema_migrations (
         name        text PRIMARY KEY,
         sha256      char(64) NOT NULL,
         applied_at  timestamptz NOT NULL DEFAULT now()
       )`);
-
-    // One migrator at a time
-    await client.query('SELECT pg_advisory_lock(hashtext($1))', ['massy_migrations']);
 
     const files = (await readdir(MIGRATIONS_DIR)).filter((f) => f.endsWith('.sql')).sort();
     const { rows: done } = await client.query<{ name: string; sha256: string }>(
@@ -39,7 +40,9 @@ export async function runMigrations(databaseUrl: string, log: (msg: string) => v
 
     for (const file of files) {
       const sql = await readFile(path.join(MIGRATIONS_DIR, file), 'utf8');
-      const hash = createHash('sha256').update(sql).digest('hex');
+      // Hash over LF-normalised content so Windows (CRLF) and Linux (LF)
+      // checkouts of the same commit agree on the fingerprint
+      const hash = createHash('sha256').update(sql.replace(/\r\n/g, '\n')).digest('hex');
       const existing = doneByName.get(file);
       if (existing) {
         if (existing !== hash) {

@@ -35,7 +35,7 @@ export default async function requisitionRoutes(app: FastifyInstance, opts: { db
          JOIN categories cat ON cat.id = r.category_id
          JOIN users u ON u.id = r.requester_id
          WHERE ($1::requisition_status IS NULL OR r.status = $1)
-           AND (r.requester_id = $2 OR app_user_can_access_cost_centre(r.cost_centre_id))
+           AND (r.requester_id = $2 OR app_user_can_read_cost_centre(r.cost_centre_id))
          ORDER BY r.created_at DESC
          LIMIT $3`,
         [query.data.status ?? null, user.id, query.data.limit],

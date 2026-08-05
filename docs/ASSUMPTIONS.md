@@ -78,7 +78,7 @@ Each item below is what the build actually does today, and what changes when the
 
 ### 2.9 Entra ID — dev-mode auth stub until app registration granted
 - The Entra ID app registration (redirect URI + Graph permissions) has not yet been granted by Massy IT.
-- Development uses a clearly-marked **auth stub** that mints local test identities. Safeguards: the stub module throws at startup if `NODE_ENV=production` or if a production database DSN is configured; it is excluded from the production build path; its use is logged on every start.
+- Development uses a clearly-marked **auth stub** (`AUTH_MODE=dev`) that signs in seeded synthetic users. Safeguard: configuration validation in `server/src/config.ts` rejects `AUTH_MODE=dev` whenever `NODE_ENV=production`, so the server **refuses to start** rather than run the stub in production (covered by `server/test/config.test.ts`). The stub only ever matches users whose identity is prefixed `dev-`, which real Entra provisioning never creates.
 - All session, RBAC, and audit behaviour is identical under the stub, so nothing downstream changes when real Entra sign-in lands.
 - `TODO(client)` — Massy IT to grant the app registration (plan §2 ask-list item 4, plan §9 Q8). **Go-live blocker.**
 
@@ -95,12 +95,31 @@ Each item below is what the build actually does today, and what changes when the
 - Cloud Service vs on-prem Report Server undecided. Reporting schema and masked views (A.8.11) are built the same either way; the choice only changes where data flows and whether an A.5.23 cloud-service assessment is triggered.
 - `TODO(client)` — decide, tied to Q7 (plan §9 Q12).
 
-### 2.13 Schema additions beyond plan §4 — `sessions` and `login_banner_acks`
-- Two tables were added that do not appear in plan §4: **`sessions`** (server-side session records: hashed token, user, created/last-seen timestamps, idle and absolute expiry, revocation) and **`login_banner_acks`** (per-user record of acceptable-use banner acknowledgement: user, banner version, timestamp).
-- These are **operational necessities, not scope creep**: A.8.5 requires enforceable 30-minute idle / 8-hour absolute session timeouts and immediate revocation, which requires server-side session state; A.5.10 requires the banner acknowledgement to be *recorded* and its acceptance test requires a fresh user to acknowledge before reaching any data.
+### 2.13 Schema additions beyond plan §4 — operational tables
+- Beyond the plan §4 tables, the schema adds: **`sessions`** (server-side session records: hashed token, CSRF token, idle/absolute expiry, revocation — required by A.8.5), banner-acknowledgement columns on **`users`** (`banner_acknowledged_at`, `banner_version` — required by A.5.10, recorded per user and re-required when the banner text changes), **`break_glass_account`** (the single A.5.17 emergency account: argon2id hash, encrypted TOTP secret, lockout state), **`reference_counters`** (gap-free §5.3 reference issuance), **`alerts`** (A.8.16 alert conditions), and **`schema_migrations`** (A.8.32 migration ledger).
+- These are **operational necessities required by §8 gates, not scope creep**: each exists to make a named control's acceptance test passable.
 - Recorded here so the deviation from §4 is explicit and reviewable. No other tables were added.
 
-### 2.14 Supabase — disposable dev/test database only
+### 2.14 Design rule adopted: org-wide roles cannot be cost-centre-scoped
+- `sysadmin`, `auditor`, `accounting` and `doa_admin` grants must always be organisation-wide
+  (`cost_centre_id` NULL) — enforced by a DB CHECK and API validation. Rationale: a
+  "cost-centre-scoped sysadmin/auditor" would satisfy org-wide role checks with over-broad
+  effect (adversarial-review finding, 2026-08-04). §3's "roles per cost centre" continues to
+  apply to `requester`, `approver` and `budget_owner`, which must be scoped.
+- Also adopted from §3's role descriptions: a requester reads **their own** requisitions, not
+  their whole cost centre's; cost-centre-wide read belongs to approvers (their centres) and
+  accounting/auditor (org-wide). `TODO(client)` — confirm both rules match the intended DOA
+  operating model.
+
+### 2.15 Pre-release baseline: 2026-08-04 security hardening edited migrations in place
+- The adversarial security review of Phase 0 led to fixes inside the existing migration files
+  (audit chain v2, RLS policy rewrite, new constraints) rather than follow-up migrations.
+  This is permissible **only** because no environment outside disposable dev/test databases had
+  ever applied them — there was nothing deployed to migrate forward. From the first shared or
+  production deployment onward, applied migrations are immutable and every change is a new file
+  (A.8.32; the migration runner enforces this with recorded SHA-256 fingerprints).
+
+### 2.16 Supabase — disposable dev/test database only
 - A Supabase-hosted cloud Postgres instance is used **only** as a disposable development/test database, containing **synthetic data only** (A.8.33 — no production data ever exists to copy, and none will be copied when it does).
 - Production is **on-prem PostgreSQL 16** per plan §2. The Supabase project will be **decommissioned before go-live** and is listed in `/docs/THIRD-PARTIES.md` with that status.
 - No production secret, hostname, or credential is shared with the Supabase environment (A.8.31).

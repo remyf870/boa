@@ -1,9 +1,10 @@
+import { readFileSync } from 'node:fs';
 import pg from 'pg';
 import type { Config } from '../config.js';
 
 export type Db = pg.Pool;
 
-export function createPool(config: Pick<Config, 'DATABASE_URL'>): Db {
+export function createPool(config: Pick<Config, 'DATABASE_URL'> & Partial<Pick<Config, 'DB_SSL_CA_FILE'>>): Db {
   const pool = new pg.Pool({
     connectionString: config.DATABASE_URL,
     max: 10,
@@ -11,6 +12,11 @@ export function createPool(config: Pick<Config, 'DATABASE_URL'>): Db {
     // All timestamps are stored and compared in UTC (A.8.17); rendering to
     // local time is the client's job.
     options: '-c timezone=UTC',
+    // A.8.24: verified TLS to PostgreSQL when a CA bundle is configured —
+    // required in production where app and DB sit on separate VLANs (§2).
+    ...(config.DB_SSL_CA_FILE
+      ? { ssl: { ca: readFileSync(config.DB_SSL_CA_FILE, 'utf8'), rejectUnauthorized: true } }
+      : {}),
   });
   return pool;
 }
