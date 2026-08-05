@@ -20,26 +20,65 @@ complete until it passes the applicable gates and `/docs/CONTROL-MATRIX.md` is u
 
 ## Quick start (development)
 
-Prerequisites: Node 20+, PostgreSQL 16 (a local instance or a dev database URL).
+Only prerequisite: **Node 20+**. You do not need PostgreSQL or Docker installed — the
+`dev:db` script boots a bundled PostgreSQL for local development.
 
-```
-# API
-cd server
-npm install
-copy .env.example .env        # fill in local values — never commit .env
-npm run migrate               # applies SQL migrations
-npm run seed                  # synthetic data only (A.8.33 — never production data)
-npm run dev
+The server deliberately **refuses to start without configuration** (A.8.9: no silent
+defaults), so run `dev:setup` first or you will get
+`Invalid server configuration: DATABASE_URL: Required …`.
 
-# Web
-cd web
-npm install
-npm run dev
+**Terminal 1 — database** (leave running):
+
+```bash
+cd server && npm install && npm run dev:setup && npm run dev:db
 ```
 
-Development auth: set `AUTH_MODE=dev` in `server/.env` to sign in as a seeded synthetic
-user without an Entra ID tenant. The server refuses to start with `AUTH_MODE=dev` when
-`NODE_ENV=production`. Production uses Microsoft Entra ID (OIDC + PKCE) only.
+**Terminal 2 — API:**
+
+```bash
+cd server && npm run migrate && npm run seed && npm run dev
+```
+
+**Terminal 3 — web UI:**
+
+```bash
+cd web && npm install && npm run dev
+```
+
+Then open **http://localhost:5173**, click *Sign in with Microsoft*, and pick any synthetic
+user from the development sign-in list.
+
+What each script does:
+
+| Script | Purpose |
+|---|---|
+| `npm run dev:setup` | Writes `server/.env` with freshly generated secrets. Gitignored; run once. |
+| `npm run dev:db` | Starts a local PostgreSQL on port 5433 (data in `server/.pgdata-dev/`). |
+| `npm run migrate` | Applies the SQL migrations. |
+| `npm run seed` | Loads synthetic data — 11 fake users, DOA v1, budgets (A.8.33). |
+| `npm run dev` | Starts the API on port 3001. |
+| `npm test` | Full suite; boots its own throwaway database. |
+
+Development auth (`AUTH_MODE=dev`) signs you in as a seeded synthetic user without an Entra
+tenant. Config validation **refuses to start** with `AUTH_MODE=dev` when
+`NODE_ENV=production` — production uses Microsoft Entra ID (OIDC + PKCE) only.
+
+Useful synthetic logins (all `@example.test`, all fake):
+
+| User | Roles |
+|---|---|
+| Riya Maharaj | Requester (Leasing) — has seeded requisitions |
+| Devon Charles | Approver (Leasing) |
+| Marcus Joseph | Accounting (org-wide) |
+| Camille Baptiste | Auditor — the only role that can read the audit log |
+| Andre Williams | System Admin — deliberately sees **no** financial records (A.8.2) |
+
+### Troubleshooting
+
+- **`Invalid server configuration: … Required`** — you skipped `npm run dev:setup`.
+- **`ECONNREFUSED ::1:5433`** — the database terminal isn't running; start `npm run dev:db`.
+- **`pre-existing shared memory block is still in use`** — a previous database process is
+  still alive. Stop it, or delete `server/.pgdata-dev/` to start clean.
 
 ## Non-negotiable engineering rules
 

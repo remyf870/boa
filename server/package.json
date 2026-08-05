@@ -9,6 +9,8 @@
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "dev:db": "tsx src/scripts/dev-db.ts",
+    "dev:setup": "tsx src/scripts/dev-setup.ts",
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",

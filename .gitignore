@@ -30,3 +30,6 @@ Thumbs.db
 
 # Embedded test database
 .pgdata-test/
+
+# Local development database
+.pgdata-dev/

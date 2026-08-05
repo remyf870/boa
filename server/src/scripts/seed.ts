@@ -193,7 +193,7 @@ try {
   );
 
   await client.query('COMMIT');
-  console.log('seed: complete — 10 synthetic users, 3 cost centres, DOA v1 active, budgets FY2026-Q3, 3 requisitions');
+  console.log('seed: complete — 11 synthetic users, 3 cost centres, DOA v1 active, budgets FY2026-Q3, 3 requisitions');
 } catch (err) {
   await client.query('ROLLBACK');
   throw err;
