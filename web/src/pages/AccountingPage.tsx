@@ -77,6 +77,13 @@ export function AccountingPage() {
                     approval {q.approval_reference ?? "—"} · approved <Money amount={q.approved_amount} currency={q.currency} /> · {q.supplier_name ?? "no supplier"}
                     {q.cdk_vendor_ref ? ` (CDK ${q.cdk_vendor_ref})` : ""} · GL {q.gl_account_code ?? "—"} · {q.cost_centre_code}
                   </p>
+                  {q.invoice_status === "pending_reapproval" ? (
+                    <p className="mt-1 text-xs text-amber-800">
+                      Awaiting variance re-approval by{" "}
+                      {q.approval_trail?.find((s) => s.purpose === "variance_reapproval" && s.decision === "pending")?.approverName ?? "the final approver"} —
+                      posting unlocks when they decide.
+                    </p>
+                  ) : null}
                 </div>
                 <div className="flex items-center gap-2">
                   <a

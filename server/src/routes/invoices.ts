@@ -73,9 +73,11 @@ export default async function invoiceRoutes(app: FastifyInstance, opts: { db: Db
           requester_id: string;
           status: string;
           amount: string;
-        }>('SELECT id, reference, requester_id, status, amount FROM requisitions WHERE id = $1 FOR UPDATE', [
-          params.data.id,
-        ]);
+          cost_centre_id: string;
+        }>(
+          'SELECT id, reference, requester_id, status, amount, cost_centre_id FROM requisitions WHERE id = $1 FOR UPDATE',
+          [params.data.id],
+        );
         const requisition = found.rows[0];
         if (!requisition || requisition.requester_id !== user.id) return { code: 404 as const, error: 'not_found' };
         // Plan §5.4: cannot upload against a denied or pending requisition
@@ -145,12 +147,21 @@ export default async function invoiceRoutes(app: FastifyInstance, opts: { db: Db
 
         let reapprovalStepId: string | null = null;
         if (needsReapproval) {
-          // Final approver = the last approved DOA step
+          // Final approver = the last approved DOA step whose approver is
+          // STILL an active user holding the approver role for this cost
+          // centre — assigning a departed approver creates an undecidable
+          // step nobody can ever action (review finding). Earlier approved
+          // steps are the fallback, highest first.
           const finalApprover = await client.query<{ assigned_user_id: string }>(
-            `SELECT assigned_user_id FROM approval_steps
-             WHERE requisition_id = $1 AND purpose = 'doa' AND decision = 'approved'
-             ORDER BY step_no DESC LIMIT 1`,
-            [requisition.id],
+            `SELECT st.assigned_user_id FROM approval_steps st
+             JOIN users u ON u.id = st.assigned_user_id AND u.status = 'active'
+             WHERE st.requisition_id = $1 AND st.purpose = 'doa' AND st.decision = 'approved'
+               AND EXISTS (SELECT 1 FROM roles_assignments ra
+                           WHERE ra.user_id = st.assigned_user_id AND ra.role = 'approver'
+                             AND ra.revoked_at IS NULL
+                             AND (ra.cost_centre_id = $2 OR ra.cost_centre_id IS NULL))
+             ORDER BY st.step_no DESC LIMIT 1`,
+            [requisition.id, requisition.cost_centre_id],
           );
           if (finalApprover.rows.length === 0) return { code: 409 as const, error: 'no_final_approver_on_record' };
           const nextStepNo = await client.query<{ n: number }>(

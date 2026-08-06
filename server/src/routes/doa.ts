@@ -53,7 +53,8 @@ export default async function doaRoutes(app: FastifyInstance, opts: { db: Db; co
       ws.addRow([`Exported at (UTC): ${new Date().toISOString()}`]);
       ws.addRow([
         'Approver cells: "job_title:Finance Manager", "user:name@domain", or "role:approver". ' +
-          'A bare value is read as a job title.',
+          'A bare value containing "@" is read as a user email; any other bare value as a job title — ' +
+          'prefer the explicit type:value form.',
       ]);
       ws.addRow([]);
       const header = ws.addRow([...DOA_TEMPLATE_COLUMNS]);

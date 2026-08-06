@@ -9,7 +9,78 @@ import { withUserContext, type Db } from '../db/pool.js';
 import { AuditAction, raiseAlert, verifyAuditChain, writeAudit } from '../audit/audit.js';
 import { buildLabelledWorkbook } from '../exports/excel.js';
 import { requireRoles } from '../plugins/rbac.js';
+import { NotificationTemplate, queueNotification } from '../notify/notifier.js';
 import { SETTING_KEYS, SettingValidationError, writeSetting, type SettingKey } from '../settings.js';
+
+/**
+ * §5.2/A.5.18: when a user is disabled or loses an approver grant, their
+ * pending approval steps become undecidable dead-ends — in nobody's queue,
+ * decidable by nobody. Re-route them the moment the orphan is created, via
+ * the SECURITY DEFINER function (0012) that re-resolves each step's FROZEN
+ * doa_rule_snapshot descriptor (A.8.2: the sysadmin never reads the
+ * requisition itself). Steps with no eligible replacement raise an alert
+ * instead of failing the admin action.
+ */
+async function reassignOrphanedSteps(
+  db: Db,
+  actorId: string,
+  affectedUserId: string,
+  costCentreId: string | null,
+  reqMeta: { ip: string; userAgent: string | null },
+): Promise<void> {
+  await withUserContext(db, actorId, async (client) => {
+    const result = await client.query<{
+      step_id: string;
+      requisition_id: string;
+      reference: string;
+      step_purpose: string;
+      new_assignee: string | null;
+      new_assignee_name: string | null;
+    }>('SELECT * FROM app_reassign_orphaned_steps($1, $2)', [affectedUserId, costCentreId]);
+
+    for (const row of result.rows) {
+      if (row.new_assignee) {
+        await queueNotification(client, {
+          recipientUserId: row.new_assignee,
+          template: NotificationTemplate.ApprovalRequested,
+          reference: row.reference,
+          deepLink: '/approvals',
+        });
+        await writeAudit(client, {
+          actorUserId: actorId,
+          action: AuditAction.ApprovalStepReassigned,
+          entityType: 'approval_step',
+          entityId: row.step_id,
+          before: { assignedUserId: affectedUserId },
+          after: {
+            assignedUserId: row.new_assignee,
+            reference: row.reference,
+            purpose: row.step_purpose,
+            cause: costCentreId === null ? 'user_disabled_or_org_revoke' : 'approver_role_revoked',
+          },
+          ipAddress: reqMeta.ip,
+          userAgent: reqMeta.userAgent,
+        });
+      } else {
+        await raiseAlert(client, 'approval_step_unassignable', 'warning', {
+          stepId: row.step_id,
+          requisitionId: row.requisition_id,
+          reference: row.reference,
+          formerAssignee: affectedUserId,
+        });
+        await writeAudit(client, {
+          actorUserId: actorId,
+          action: AuditAction.ApprovalStepUnassignable,
+          entityType: 'approval_step',
+          entityId: row.step_id,
+          after: { reference: row.reference, formerAssignee: affectedUserId },
+          ipAddress: reqMeta.ip,
+          userAgent: reqMeta.userAgent,
+        });
+      }
+    }
+  });
+}
 
 const ROLE_VALUES = [
   'requester',
@@ -68,6 +139,11 @@ export default async function adminRoutes(app: FastifyInstance, opts: { db: Db; 
     if (body.data.status === 'disabled') {
       // A.5.18: revocation is immediate — kill every live session
       await db.query('UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL', [target.id]);
+      // ...and re-route any pending approval steps they leave behind (§5.2)
+      await reassignOrphanedSteps(db, actor.id, target.id, null, {
+        ip: req.ip,
+        userAgent: req.headers['user-agent'] ?? null,
+      });
     }
     await writeAudit(db, {
       actorUserId: actor.id,
@@ -189,6 +265,23 @@ export default async function adminRoutes(app: FastifyInstance, opts: { db: Db; 
       'UPDATE roles_assignments SET revoked_at = now(), revoked_by = $2, revoked_reason = $3 WHERE id = $1',
       [grant.id, actor.id, body.data.reason],
     );
+    if (grant.role === 'approver') {
+      // Pending steps that relied on this grant are now undecidable — unless
+      // another live grant still covers them, in which case the function
+      // finds no orphans to move (it re-checks eligibility per step).
+      const stillCovered = await db.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM roles_assignments
+         WHERE user_id = $1 AND role = 'approver' AND revoked_at IS NULL
+           AND ($2::uuid IS NULL OR cost_centre_id IS NULL OR cost_centre_id = $2)`,
+        [grant.user_id, grant.cost_centre_id],
+      );
+      if (Number(stillCovered.rows[0]!.n) === 0) {
+        await reassignOrphanedSteps(db, actor.id, grant.user_id, grant.cost_centre_id, {
+          ip: req.ip,
+          userAgent: req.headers['user-agent'] ?? null,
+        });
+      }
+    }
     await writeAudit(db, {
       actorUserId: actor.id,
       action: AuditAction.RoleRevoked,

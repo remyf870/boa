@@ -29,6 +29,8 @@ export const AuditAction = {
   RequisitionApproved: 'requisition.approved', // final approval — reference issued
   RequisitionDenied: 'requisition.denied',
   ApprovalStepDecided: 'approval.step_decided',
+  ApprovalStepReassigned: 'approval.step_reassigned',
+  ApprovalStepUnassignable: 'approval.step_unassignable',
   SelfApprovalBlocked: 'approval.self_approval_blocked',
   DoaConflictBlocked: 'approval.doa_conflict_blocked',
   DelegationCreated: 'delegation.created',

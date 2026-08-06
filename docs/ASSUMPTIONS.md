@@ -210,9 +210,31 @@ regression test):
   remedy (corrected re-upload).
 
 The same review confirmed 33 further findings across the budget, requester, approver,
-accounting and navigation journeys (6 high severity). They are being fixed
-highest-severity first; each fix updates this file or the control matrix only where it
-changes a control's story.
+accounting and navigation journeys (6 high severity). All six highs plus the cheap adjacent
+fixes were closed the same day (migration `0012` + routes + web); the remaining confirmed
+items live in `docs/KNOWN-GAPS.md` with severities and fix sketches. Judgement calls taken
+while fixing:
+
+- **Departed approvers: reassign at the moment of the admin action.** Disabling a user or
+  revoking their approver grant now re-routes their pending steps to the next active user
+  matching the step's FROZEN `doa_rule_snapshot` descriptor (same candidate ordering as the
+  engine), inside the admin action itself — not via a sysadmin browsing surface, which A.8.2
+  forbids. The mechanics live in a SECURITY DEFINER function (`0012`) that returns
+  identifiers only, never amounts; a step with no eligible replacement raises an
+  `approval_step_unassignable` alert instead of failing the admin action. The invoice
+  variance path likewise skips inactive/role-revoked final approvers when creating the
+  re-approval step.
+- **Variance re-approval budget impact is the incremental excess.** The live position
+  already carries the approved amount in `committed`, so the decide surface (and the
+  `budget_remaining_at_decision` recorded on the step) now charges only
+  `invoice − remaining commitment`, floored at 0 — previously it double-counted the
+  requisition amount and never showed the invoice being decided.
+- **In-app budget proposals start from the active budget.** The propose form prefills every
+  category with its active amount (matching the Excel template); dropping a funded category
+  is now an explicit, confirmed act instead of a silent zeroing on approval.
+- **Ghost variance steps are hidden, not voided.** Queue and dashboard exclude variance
+  steps whose invoice is no longer `pending_reapproval`; a proper `void` decision value is
+  deferred (KNOWN-GAPS D4) because it needs an enum migration.
 
 ---
 

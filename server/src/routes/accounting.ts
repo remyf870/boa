@@ -10,6 +10,7 @@ import { AuditAction, writeAudit } from '../audit/audit.js';
 import { requireRoles } from '../plugins/rbac.js';
 import { buildLabelledWorkbook } from '../exports/excel.js';
 import { eventBus } from '../events/bus.js';
+import { NotificationTemplate, queueNotification } from '../notify/notifier.js';
 
 export default async function accountingRoutes(app: FastifyInstance, opts: { db: Db; config: Config }) {
   const { db } = opts;
@@ -148,20 +149,45 @@ export default async function accountingRoutes(app: FastifyInstance, opts: { db:
       if (!body.success) return reply.code(400).send({ error: 'reason_required' });
 
       const outcome = await withUserContext(db, user.id, async (client) => {
-        const found = await client.query<{ id: string; status: string }>(
-          'SELECT id, status FROM invoices WHERE id = $1 FOR UPDATE',
+        const found = await client.query<{
+          id: string;
+          status: string;
+          submitted_by: string | null;
+          requisition_id: string;
+          reference: string;
+        }>(
+          `SELECT i.id, i.status, i.submitted_by, i.requisition_id, r.reference
+           FROM invoices i JOIN requisitions r ON r.id = i.requisition_id
+           WHERE i.id = $1 FOR UPDATE OF i`,
           [params.data.id],
         );
         const invoice = found.rows[0];
         if (!invoice) return { code: 404 as const };
         if (!['submitted', 'pending_reapproval'].includes(invoice.status)) return { code: 409 as const };
-        await client.query(`UPDATE invoices SET status = 'rejected' WHERE id = $1`, [invoice.id]);
+        // The reason lives on the record (0012) so the requester can read it
+        // in-app — the audit payload alone is auditor-only (review finding).
+        await client.query(
+          `UPDATE invoices
+           SET status = 'rejected', rejected_by = $2, rejected_at = now(), rejection_reason = $3
+           WHERE id = $1`,
+          [invoice.id, user.id, body.data.reason],
+        );
+        // The person whose invoice just died must be told (review finding:
+        // rejection was completely silent).
+        if (invoice.submitted_by) {
+          await queueNotification(client, {
+            recipientUserId: invoice.submitted_by,
+            template: NotificationTemplate.InvoiceRejected,
+            reference: invoice.reference,
+            deepLink: `/requisitions/${invoice.requisition_id}`,
+          });
+        }
         await writeAudit(client, {
           actorUserId: user.id,
           action: 'invoice.rejected',
           entityType: 'invoice',
           entityId: invoice.id,
-          after: { reason: body.data.reason },
+          after: { reason: body.data.reason, requisitionReference: invoice.reference },
           ipAddress: req.ip,
           userAgent: req.headers['user-agent'] ?? null,
         });
@@ -195,6 +221,10 @@ export default async function accountingRoutes(app: FastifyInstance, opts: { db:
            JOIN categories cat ON cat.id = r.category_id
            LEFT JOIN suppliers s ON s.id = r.supplier_id
            WHERE i.status = 'submitted'
+             -- Same guard as the queue and the posting endpoint: spend whose
+             -- approval has been withdrawn never reaches the CDK batch
+             -- (review finding — the three surfaces must agree).
+             AND r.status IN ('approved', 'closed')
            ORDER BY i.created_at`,
         );
         return result.rows;

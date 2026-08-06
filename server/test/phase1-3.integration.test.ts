@@ -1073,6 +1073,25 @@ describe.skipIf(!TEST_DATABASE_URL)('Phases 1-3 (§5.1-§5.9, §6.1-§6.3)', () 
     expect(
       (await post(accountant, `/api/accounting/invoices/${invoiceId}/reject`, { reason: 'wrong document' })).statusCode,
     ).toBe(200);
+
+    // The rejection is visible and explainable to the requester (0012): the
+    // reason lives on the record, the detail API returns it, and a
+    // notification is queued — it used to vanish into the auditor-only log.
+    const rejectedRow = await db.query<{ rejection_reason: string; rejected_by: string }>(
+      'SELECT rejection_reason, rejected_by FROM invoices WHERE id = $1',
+      [invoiceId],
+    );
+    expect(rejectedRow.rows[0]!.rejection_reason).toBe('wrong document');
+    expect(rejectedRow.rows[0]!.rejected_by).toBe(fx.accountant);
+    const rejectNotice = await db.query(
+      `SELECT 1 FROM notification_outbox WHERE template = 'invoice_rejected' AND recipient_user_id = $1`,
+      [fx.requester],
+    );
+    expect(rejectNotice.rows.length).toBeGreaterThanOrEqual(1);
+    const detailAfterReject = await get(requester, `/api/requisitions/${draft.id}`);
+    const invoicesShown = (detailAfterReject.json() as { invoices: { id: string; rejection_reason: string | null }[] })
+      .invoices;
+    expect(invoicesShown.find((i) => i.id === invoiceId)?.rejection_reason).toBe('wrong document');
     expect((await post(requester, `/api/requisitions/${draft.id}/cancel`, { reason: 'supplier fell through' })).statusCode).toBe(
       200,
     );
@@ -1115,11 +1134,195 @@ describe.skipIf(!TEST_DATABASE_URL)('Phases 1-3 (§5.1-§5.9, §6.1-§6.3)', () 
       `SELECT id FROM approval_steps WHERE requisition_id = $1 AND purpose = 'variance_reapproval'`,
       [draft.id],
     );
+
+    // The step is no longer a ghost work item: Accounting's rejection
+    // resolved the matter, so it must vanish from the approver's queue
+    // (review finding).
+    const queueAfterReject = await get(approver, '/api/approvals/queue');
+    expect(
+      (queueAfterReject.json() as { queue: { step_id: string }[] }).queue.some(
+        (i) => i.step_id === varianceStep.rows[0]!.id,
+      ),
+    ).toBe(false);
     expect((await post(approver, `/api/approvals/steps/${varianceStep.rows[0]!.id}/approve`)).statusCode).toBe(200);
 
     // The rejection stands
     const after = await db.query<{ status: string }>('SELECT status FROM invoices WHERE id = $1', [invoiceId]);
     expect(after.rows[0]!.status).toBe('rejected');
+  });
+
+  it('§5.4: the variance decide surface shows the invoice and only the incremental excess, and resolves it loudly', async () => {
+    const requester = await loginAs(fx.requester);
+    const draft = await createDraft(requester, 2000);
+    await post(requester, `/api/requisitions/${draft.id}/submit`);
+    const step = await db.query<{ id: string }>(
+      `SELECT id FROM approval_steps WHERE requisition_id = $1 AND step_no = 1`,
+      [draft.id],
+    );
+    const approver = await loginAs(fx.approver);
+    await post(approver, `/api/approvals/steps/${step.rows[0]!.id}/approve`);
+
+    const invoice = await upload(
+      requester,
+      `/api/requisitions/${draft.id}/invoice`,
+      { invoiceNo: `INV-${RUN}-V1`, invoiceDate: '2026-08-05', amount: '3000', currency: 'TTD' },
+      { filename: 'v1.pdf', contentType: 'application/pdf', data: PDF_BYTES },
+    );
+    expect((invoice.json() as { needsReapproval: boolean }).needsReapproval).toBe(true);
+    const vStep = await db.query<{ id: string }>(
+      `SELECT id FROM approval_steps WHERE requisition_id = $1 AND purpose = 'variance_reapproval'`,
+      [draft.id],
+    );
+
+    // The decide surface names the invoice being decided and charges only the
+    // excess beyond the committed approval: 3000 invoice − 2000 committed =
+    // 1000, NOT the 2000 requisition amount (which is already in `committed`
+    // — charging it again double-counted; review finding).
+    const detail = await get(approver, `/api/approvals/steps/${vStep.rows[0]!.id}`);
+    expect(detail.statusCode).toBe(200);
+    const body = detail.json() as {
+      step: { invoice_amount: string; invoice_no: string };
+      budget: { available: string; incrementalImpact: string; afterApproval: string };
+    };
+    expect(Number(body.step.invoice_amount)).toBe(3000);
+    expect(body.step.invoice_no).toBe(`INV-${RUN}-V1`);
+    expect(body.budget.incrementalImpact).toBe('1000.00');
+    expect(Number(body.budget.afterApproval)).toBeCloseTo(Number(body.budget.available) - 1000, 2);
+
+    // Approving resolves the invoice and tells the people waiting on it:
+    // the submitter and Accounting (it used to happen in complete silence).
+    expect((await post(approver, `/api/approvals/steps/${vStep.rows[0]!.id}/approve`)).statusCode).toBe(200);
+    const resolved = await db.query<{ status: string }>(
+      'SELECT status FROM invoices WHERE requisition_id = $1',
+      [draft.id],
+    );
+    expect(resolved.rows[0]!.status).toBe('submitted');
+    for (const recipient of [fx.requester, fx.accountant]) {
+      const notice = await db.query(
+        `SELECT 1 FROM notification_outbox
+         WHERE template = 'invoice_reapproval_approved' AND recipient_user_id = $1 AND subject LIKE $2`,
+        [recipient, `%${draft.reference}%`],
+      );
+      expect(notice.rows.length).toBe(1);
+    }
+    // The remaining balance recorded on the step is the corrected figure
+    const decided = await db.query<{ budget_remaining_at_decision: string }>(
+      'SELECT budget_remaining_at_decision FROM approval_steps WHERE id = $1',
+      [vStep.rows[0]!.id],
+    );
+    expect(Number(decided.rows[0]!.budget_remaining_at_decision)).toBeCloseTo(Number(body.budget.afterApproval), 2);
+  });
+
+  it('§5.4: a declined variance re-approval rejects the invoice with the reason on record and notifies the submitter', async () => {
+    const requester = await loginAs(fx.requester);
+    const draft = await createDraft(requester, 1000);
+    await post(requester, `/api/requisitions/${draft.id}/submit`);
+    const step = await db.query<{ id: string }>(
+      `SELECT id FROM approval_steps WHERE requisition_id = $1 AND step_no = 1`,
+      [draft.id],
+    );
+    const approver = await loginAs(fx.approver);
+    await post(approver, `/api/approvals/steps/${step.rows[0]!.id}/approve`);
+    const invoice = await upload(
+      requester,
+      `/api/requisitions/${draft.id}/invoice`,
+      { invoiceNo: `INV-${RUN}-V2`, invoiceDate: '2026-08-05', amount: '1500', currency: 'TTD' },
+      { filename: 'v2.pdf', contentType: 'application/pdf', data: PDF_BYTES },
+    );
+    const { invoiceId } = invoice.json() as { invoiceId: string };
+    const vStep = await db.query<{ id: string }>(
+      `SELECT id FROM approval_steps WHERE requisition_id = $1 AND purpose = 'variance_reapproval'`,
+      [draft.id],
+    );
+
+    expect(
+      (await post(approver, `/api/approvals/steps/${vStep.rows[0]!.id}/deny`, { reason: 'price was never agreed' }))
+        .statusCode,
+    ).toBe(200);
+    const rejected = await db.query<{ status: string; rejection_reason: string; rejected_by: string }>(
+      'SELECT status, rejection_reason, rejected_by FROM invoices WHERE id = $1',
+      [invoiceId],
+    );
+    expect(rejected.rows[0]!.status).toBe('rejected');
+    expect(rejected.rows[0]!.rejection_reason).toBe('price was never agreed');
+    expect(rejected.rows[0]!.rejected_by).toBe(fx.approver);
+    const notice = await db.query(
+      `SELECT 1 FROM notification_outbox
+       WHERE template = 'invoice_reapproval_rejected' AND recipient_user_id = $1 AND subject LIKE $2`,
+      [fx.requester, `%${draft.reference}%`],
+    );
+    expect(notice.rows.length).toBe(1);
+  });
+
+  it('§5.2/A.5.18: disabling an approver re-routes their pending steps; with no replacement an alert is raised', async () => {
+    const requester = await loginAs(fx.requester);
+    const draft = await createDraft(requester, 1500);
+    await post(requester, `/api/requisitions/${draft.id}/submit`);
+    const step = await db.query<{ id: string; assigned_user_id: string }>(
+      `SELECT id, assigned_user_id FROM approval_steps WHERE requisition_id = $1 AND step_no = 1`,
+      [draft.id],
+    );
+    expect(step.rows[0]!.assigned_user_id).toBe(fx.approver);
+    const sysadmin = await loginAs(fx.sysadmin);
+
+    // No other user matches the step's frozen descriptor yet: disabling the
+    // approver must not leave a silent dead-end — an alert is raised.
+    expect(
+      (await post(sysadmin, `/api/admin/users/${fx.approver}/status`, { status: 'disabled', reason: 'left the company (test)' }))
+        .statusCode,
+    ).toBe(200);
+    const alert = await db.query(
+      `SELECT 1 FROM alerts WHERE rule = 'approval_step_unassignable' AND details->>'stepId' = $1`,
+      [step.rows[0]!.id],
+    );
+    expect(alert.rows.length).toBe(1);
+    expect(
+      (await post(sysadmin, `/api/admin/users/${fx.approver}/status`, { status: 'active', reason: 'restore (test)' }))
+        .statusCode,
+    ).toBe(200);
+
+    // With a replacement holding the same job title + approver role, the step
+    // is re-routed at the moment the orphan is created, audited and notified.
+    const replacement = await db.query<{ id: string }>(
+      `INSERT INTO users (entra_object_id, email, display_name, job_title)
+       VALUES ($1, $2, 'Replacement Approver', $3) RETURNING id`,
+      [`dev-rep-${RUN}`, `rep-${RUN}@example.test`, fx.titleA],
+    );
+    await db.query(
+      `INSERT INTO roles_assignments (user_id, role, cost_centre_id, granted_by, granted_reason)
+       VALUES ($1, 'approver', $2, $3, 'test replacement')`,
+      [replacement.rows[0]!.id, fx.ccLea, fx.sysadmin],
+    );
+    expect(
+      (await post(sysadmin, `/api/admin/users/${fx.approver}/status`, { status: 'disabled', reason: 'left again (test)' }))
+        .statusCode,
+    ).toBe(200);
+    const after = await db.query<{ assigned_user_id: string }>(
+      'SELECT assigned_user_id FROM approval_steps WHERE id = $1',
+      [step.rows[0]!.id],
+    );
+    expect(after.rows[0]!.assigned_user_id).toBe(replacement.rows[0]!.id);
+    const audit = await db.query(
+      `SELECT 1 FROM audit_log WHERE action = 'approval.step_reassigned' AND entity_id = $1`,
+      [step.rows[0]!.id],
+    );
+    expect(audit.rows.length).toBe(1);
+    const notice = await db.query(
+      `SELECT 1 FROM notification_outbox
+       WHERE template = 'approval_requested' AND recipient_user_id = $1 AND subject LIKE $2`,
+      [replacement.rows[0]!.id, `%${draft.reference}%`],
+    );
+    expect(notice.rows.length).toBe(1);
+
+    // ...and the replacement can actually decide it
+    const rep = await loginAs(replacement.rows[0]!.id);
+    expect((await post(rep, `/api/approvals/steps/${step.rows[0]!.id}/approve`)).statusCode).toBe(200);
+
+    // Restore the original approver for any later tests
+    expect(
+      (await post(sysadmin, `/api/admin/users/${fx.approver}/status`, { status: 'active', reason: 'restore (test)' }))
+        .statusCode,
+    ).toBe(200);
   });
 
   it('A.5.3: the database refuses an approval with undecided steps, even by direct SQL', async () => {

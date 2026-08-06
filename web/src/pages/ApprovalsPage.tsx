@@ -40,7 +40,18 @@ function DecideModal({ stepId, onClose }: { stepId: string; onClose: (decided: b
         <>
           <div className="text-sm">
             <p className="font-medium text-slate-900">
-              {detail.data.step.reference} — <Money amount={detail.data.step.amount} currency={detail.data.step.currency} />
+              {detail.data.step.reference} —{" "}
+              <Money
+                amount={
+                  detail.data.step.purpose === "variance_reapproval" && detail.data.step.invoice_amount
+                    ? detail.data.step.invoice_amount
+                    : detail.data.step.amount
+                }
+                currency={detail.data.step.currency}
+              />
+              {detail.data.step.purpose === "variance_reapproval" && detail.data.step.invoice_no ? (
+                <span className="ml-1 text-xs font-normal text-slate-500">(invoice {detail.data.step.invoice_no})</span>
+              ) : null}
             </p>
             <p className="mt-1 text-slate-600">{detail.data.step.description}</p>
             <p className="mt-1 text-slate-500">Justification: {detail.data.step.justification}</p>
@@ -49,17 +60,30 @@ function DecideModal({ stepId, onClose }: { stepId: string; onClose: (decided: b
               {detail.data.step.supplier_name ? ` · supplier ${detail.data.step.supplier_name}` : ""}
             </p>
             {detail.data.step.purpose === "variance_reapproval" ? (
-              <p className="mt-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-amber-900">
-                This is an invoice variance re-approval: the supplier invoice exceeds the approved amount beyond the configured tolerance.
-              </p>
+              <div className="mt-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-amber-900">
+                <p>Invoice variance re-approval: the running invoice total exceeds the approved amount beyond the configured tolerance.</p>
+                <p className="mt-1">
+                  Invoice: <Money amount={detail.data.step.invoice_amount ?? "0"} currency={detail.data.step.currency} /> · originally approved:{" "}
+                  <Money amount={detail.data.step.amount} currency={detail.data.step.currency} />
+                  {detail.data.step.variance_vs_approved !== null
+                    ? ` · cumulative variance ${(Number(detail.data.step.variance_vs_approved) * 100).toFixed(1)}%`
+                    : ""}
+                </p>
+              </div>
             ) : null}
           </div>
           <div className="mt-3 rounded border border-slate-200 bg-slate-50 p-3 text-sm">
             <p className="font-medium text-slate-900">Budget impact ({detail.data.budget.period})</p>
             <p className="mt-1 text-slate-700">
-              Available now: <Money amount={detail.data.budget.available} currency={detail.data.step.currency} /> · After approval:{" "}
+              Available now: <Money amount={detail.data.budget.available} currency={detail.data.step.currency} /> · This decision adds:{" "}
+              <Money amount={detail.data.budget.incrementalImpact} currency={detail.data.step.currency} /> · After approval:{" "}
               <Money amount={detail.data.budget.afterApproval} currency={detail.data.step.currency} />
             </p>
+            {detail.data.step.purpose === "variance_reapproval" ? (
+              <p className="mt-1 text-xs text-slate-500">
+                The approved amount is already committed against the budget — the impact shown is only the excess this re-approval would newly authorise.
+              </p>
+            ) : null}
           </div>
           <div className="mt-3">
             <Field label="Reason (mandatory when denying)">

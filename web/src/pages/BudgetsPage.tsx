@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { api } from "../api/client";
+import { api, ApiError } from "../api/client";
 import type { BudgetPosition, BudgetVersionDetail, BudgetVersionRow, ReferenceData } from "../api/types";
 import { hasRole } from "../api/types";
 import { useAuth } from "../components/AuthProvider";
@@ -96,23 +96,50 @@ function ProposeModal({
   costCentreId,
   period,
   reference,
+  position,
   onClose,
 }: {
   costCentreId: string;
   period: string;
   reference: ReferenceData;
+  position: BudgetPosition | null;
   onClose: (created: boolean) => void;
 }) {
   const [reason, setReason] = useState("");
-  const [lines, setLines] = useState<Record<string, string>>({});
+  // Prefilled with the ACTIVE budget so the owner edits from the real
+  // baseline. Starting blank silently dropped every untouched category to
+  // zero the moment the proposal was approved (review finding — the Excel
+  // template always prefilled; the in-app form now matches).
+  const activeByCategory = new Map(
+    (position?.categories ?? []).filter((c) => Number(c.budget) > 0).map((c) => [c.categoryId, c.budget]),
+  );
+  const [lines, setLines] = useState<Record<string, string>>(() =>
+    Object.fromEntries([...activeByCategory.entries()].map(([id, amount]) => [id, String(Number(amount))])),
+  );
   const [file, setFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [confirmDrop, setConfirmDrop] = useState<string[] | null>(null);
+
+  /** Categories with an active budget that this proposal would zero out. */
+  const droppedCategories = () =>
+    reference.categories
+      .filter((c) => activeByCategory.has(c.id) && !((lines[c.id] ?? "") !== "" && Number(lines[c.id]) >= 0))
+      .map((c) => c.code);
 
   /** `sendForApproval` is the default action: creating a draft nobody is told
    * to submit was a dead-end — the proposal simply sat there while the
    * approver saw a version with no available action. */
   const submit = async (sendForApproval: boolean) => {
+    // A category with budget left blank goes to ZERO on approval — make that
+    // an explicit, confirmed act rather than a silent side effect.
+    if (!file) {
+      const dropped = droppedCategories();
+      if (dropped.length > 0 && confirmDrop === null) {
+        setConfirmDrop(dropped);
+        return;
+      }
+    }
     setBusy(true);
     setError(null);
     try {
@@ -149,6 +176,7 @@ function ProposeModal({
     <Modal title={`Propose budget — ${period}`} onClose={() => onClose(false)}>
       <p className="text-sm text-slate-500">
         The proposal becomes a draft version. After you submit it, a Budget Approver must approve it before it takes effect (§5.9). Nothing changes until then.
+        Amounts are prefilled from the current active budget — what you leave untouched stays as it is proposed below.
       </p>
       <div className="mt-3">
         <Field label="Reason for this budget / change (mandatory)">
@@ -157,19 +185,32 @@ function ProposeModal({
       </div>
       <div className="mt-3 grid grid-cols-2 gap-2">
         {reference.categories.map((c) => (
-          <Field key={c.id} label={`${c.code} — ${c.name}`}>
+          <Field
+            key={c.id}
+            label={`${c.code} — ${c.name}`}
+            hint={activeByCategory.has(c.id) ? `current: ${Number(activeByCategory.get(c.id)).toLocaleString()}` : "no budget in the active version"}
+          >
             <input
               className={inputClass}
               type="number"
               min="0"
               step="0.01"
               value={lines[c.id] ?? ""}
-              onChange={(e) => setLines((l) => ({ ...l, [c.id]: e.target.value }))}
+              onChange={(e) => {
+                setConfirmDrop(null);
+                setLines((l) => ({ ...l, [c.id]: e.target.value }));
+              }}
               disabled={!!file}
             />
           </Field>
         ))}
       </div>
+      {confirmDrop !== null ? (
+        <p className="mt-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          This proposal leaves {confirmDrop.join(", ")} blank — on approval {confirmDrop.length > 1 ? "their budgets go" : "its budget goes"} to zero while any
+          committed or actual spend remains. Click the same button again to proceed, or fill the amount{confirmDrop.length > 1 ? "s" : ""} in.
+        </p>
+      ) : null}
       <div className="mt-3 flex items-center gap-3">
         <a className="text-sm text-slate-700 underline underline-offset-2" href={`/api/budgets/template.xlsx?costCentreId=${costCentreId}&period=${period}`}>
           Download Excel template
@@ -207,7 +248,16 @@ function VersionDetailModal({ versionId, onClose }: { versionId: string; onClose
       await api(path, { method: "POST", body });
       onClose(true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Action failed");
+      setError(
+        err instanceof ApiError && err.status === 409
+          ? "Another approver decided this proposal first — the view below has been refreshed."
+          : err instanceof Error
+            ? err.message
+            : "Action failed",
+      );
+      // A 409 means the version moved under us: re-fetch so the buttons match
+      // its real state instead of offering a decision that no longer exists.
+      detail.refresh();
     }
   };
 
@@ -492,6 +542,7 @@ export function BudgetsPage() {
           costCentreId={selected}
           period={period}
           reference={reference.data}
+          position={position.data}
           onClose={(created) => {
             setShowPropose(false);
             if (created) refreshAll();

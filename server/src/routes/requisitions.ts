@@ -123,7 +123,7 @@ export default async function requisitionRoutes(app: FastifyInstance, opts: { db
         client.query(
           `SELECT i.id, i.invoice_no, i.invoice_date, i.amount, i.currency, i.status,
                   i.variance_vs_approved, i.cdk_reference, i.posted_at, i.created_at,
-                  i.attachment_id
+                  i.attachment_id, i.rejection_reason, i.rejected_at
            FROM invoices i
            WHERE i.requisition_id = $1
            ORDER BY i.created_at`,
@@ -482,7 +482,12 @@ export default async function requisitionRoutes(app: FastifyInstance, opts: { db
         [row.id],
       );
       if (Number(liveInvoices.rows[0]!.n) > 0) {
-        return { code: 409 as const, error: 'open_invoices_exist' };
+        return {
+          code: 409 as const,
+          error: 'open_invoices_exist',
+          message:
+            'An invoice on this requisition is still awaiting posting — ask Accounting to post or reject it before cancelling',
+        };
       }
       await client.query(
         `UPDATE requisitions SET status = 'cancelled', closed_at = now(), updated_at = now() WHERE id = $1`,
@@ -501,7 +506,10 @@ export default async function requisitionRoutes(app: FastifyInstance, opts: { db
       return { code: 200 as const, wasApproved: row.status === 'approved', costCentreId: row.cost_centre_id };
     });
     if (outcome.code !== 200) {
-      return reply.code(outcome.code).send({ error: 'error' in outcome ? outcome.error : 'not_found' });
+      return reply.code(outcome.code).send({
+        error: 'error' in outcome ? outcome.error : 'not_found',
+        ...('message' in outcome ? { message: outcome.message } : {}),
+      });
     }
     if (outcome.wasApproved) {
       // Commitment released — update every open budget screen (plan §5.9)

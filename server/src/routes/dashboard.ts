@@ -48,7 +48,10 @@ export default async function dashboardRoutes(app: FastifyInstance, opts: { db: 
                                    WHERE prev.requisition_id = st.requisition_id
                                      AND prev.purpose = 'doa' AND prev.step_no < st.step_no
                                      AND prev.decision <> 'approved'))
-                  OR (st.purpose = 'variance_reapproval' AND r.status IN ('approved','closed')))`,
+                  OR (st.purpose = 'variance_reapproval' AND r.status IN ('approved','closed')
+                      AND EXISTS (SELECT 1 FROM invoices i
+                                  WHERE i.reapproval_step_id = st.id
+                                    AND i.status = 'pending_reapproval')))`,
           [user.id],
         ),
         client.query(

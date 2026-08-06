@@ -38,3 +38,6 @@ Thumbs.db
 
 # Local development database
 .pgdata-dev/
+
+# TypeScript incremental build state
+*.tsbuildinfo

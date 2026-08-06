@@ -112,10 +112,19 @@ export function RequisitionDetailPage() {
           <p className="mt-1 text-sm text-slate-500">
             {r.cost_centre_code} · {r.category_code} · raised by {r.requester_name} on {formatDate(r.created_at)}
           </p>
-          {r.approval_reference ? (
+          {/* Gated on live status, not just the reference: a cancellation
+              withdraws the authority — telling the requester to "contact the
+              supplier" on a cancelled requisition was wrong (review finding). */}
+          {r.approval_reference && ["approved", "closed"].includes(r.status) ? (
             <p className="mt-2 rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
               Approval Reference: <span className="font-semibold">{r.approval_reference}</span> — you may now contact the supplier. Quote this reference on the
               invoice.
+            </p>
+          ) : null}
+          {r.approval_reference && r.status === "cancelled" ? (
+            <p className="mt-2 rounded border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+              This requisition was approved as <span className="font-semibold">{r.approval_reference}</span> but has since been cancelled — the approval is
+              withdrawn and no further spend may reference it.
             </p>
           ) : null}
         </div>
@@ -138,7 +147,7 @@ export function RequisitionDetailPage() {
               Submit invoice
             </Button>
           ) : null}
-          {r.approval_reference ? (
+          {r.approval_reference && ["approved", "closed"].includes(r.status) ? (
             <a
               className="rounded border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
               href={`/api/requisitions/${r.id}/certificate.pdf`}
@@ -200,7 +209,15 @@ export function RequisitionDetailPage() {
                   </p>
                   {s.decision_reason ? <p className="mt-1 text-xs text-red-700">Reason: {s.decision_reason}</p> : null}
                 </div>
-                <StatusBadge status={s.decision} />
+                {/* A step the chain never reached is not "pending" — nobody
+                    is going to decide it (review finding). */}
+                {s.decision === "pending" && ["denied", "cancelled"].includes(r.status) ? (
+                  <span className="inline-block rounded border border-transparent bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-500">
+                    not reached
+                  </span>
+                ) : (
+                  <StatusBadge status={s.decision} />
+                )}
               </li>
             ))}
           </ol>
@@ -245,6 +262,12 @@ export function RequisitionDetailPage() {
                     {i.variance_vs_approved !== null ? ` · variance ${(Number(i.variance_vs_approved) * 100).toFixed(1)}%` : ""}
                     {i.cdk_reference ? ` · CDK ${i.cdk_reference}` : ""}
                   </p>
+                  {i.status === "rejected" && i.rejection_reason ? (
+                    <p className="mt-1 text-xs text-red-700">
+                      Rejected{i.rejected_at ? ` ${formatDate(i.rejected_at)}` : ""}: {i.rejection_reason} — submit a corrected invoice if the purchase still
+                      stands.
+                    </p>
+                  ) : null}
                 </div>
                 <StatusBadge status={i.status} />
               </li>

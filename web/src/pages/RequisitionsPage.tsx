@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import type { PreviewResponse, ReferenceData, RequisitionRow } from "../api/types";
+import { hasRole } from "../api/types";
+import { useAuth } from "../components/AuthProvider";
 import { useApiQuery } from "../hooks/useApi";
 import { Button, EmptyState, ErrorNote, Field, formatDate, inputClass, Modal, Money, StatusBadge } from "../components/ui";
 
@@ -9,8 +11,14 @@ import { Button, EmptyState, ErrorNote, Field, formatDate, inputClass, Modal, Mo
  * displays, resolved from the active DOA as the user types. */
 function NewRequisitionModal({ reference, onClose }: { reference: ReferenceData; onClose: (created: string | null) => void }) {
   const navigate = useNavigate();
+  const { state } = useAuth();
+  const me = state.status === "authenticated" ? state.user : null;
+  // Only cost centres this user can actually raise requisitions in — offering
+  // the rest made the preview silently vanish and the save fail with
+  // "forbidden" (review finding; the server stays authoritative).
+  const requestableCostCentres = reference.costCentres.filter((cc) => hasRole(me, "requester", cc.id));
   const [form, setForm] = useState({
-    costCentreId: reference.costCentres[0]?.id ?? "",
+    costCentreId: requestableCostCentres[0]?.id ?? "",
     categoryId: reference.categories[0]?.id ?? "",
     supplierId: "",
     description: "",
@@ -77,7 +85,7 @@ function NewRequisitionModal({ reference, onClose }: { reference: ReferenceData;
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <Field label="Cost centre">
           <select className={inputClass} value={form.costCentreId} onChange={(e) => set("costCentreId")(e.target.value)}>
-            {reference.costCentres.map((cc) => (
+            {requestableCostCentres.map((cc) => (
               <option key={cc.id} value={cc.id}>
                 {cc.code} — {cc.name}
               </option>

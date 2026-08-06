@@ -116,6 +116,8 @@ export interface InvoiceRow {
   posted_at: string | null;
   created_at: string;
   attachment_id: string;
+  rejection_reason: string | null;
+  rejected_at: string | null;
 }
 
 export interface RequisitionDetail {
@@ -184,8 +186,20 @@ export interface StepDetail {
     requester_name: string;
     supplier_name: string | null;
     workflow_flags: unknown[];
+    /** Present when purpose = variance_reapproval: the invoice being decided. */
+    invoice_no: string | null;
+    invoice_amount: string | null;
+    invoice_status: string | null;
+    variance_vs_approved: string | null;
   };
-  budget: { period: string; available: string; afterApproval: string };
+  budget: {
+    period: string;
+    available: string;
+    afterApproval: string;
+    /** What this decision would newly take from the budget (variance steps:
+     * the excess beyond the already-committed approval, not the full amount). */
+    incrementalImpact: string;
+  };
 }
 
 export interface DelegationRow {

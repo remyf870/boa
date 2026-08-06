@@ -7,6 +7,7 @@
 // Variance re-approval steps (plan §5.4) are decided through the same
 // endpoints and resolve the linked invoice instead of the requisition.
 import type { FastifyInstance } from 'fastify';
+import type pg from 'pg';
 import { z } from 'zod';
 import type { Config } from '../config.js';
 import { withUserContext, type Db } from '../db/pool.js';
@@ -33,18 +34,44 @@ interface StepRow {
   doa_version_id: string | null;
   doa_uploaded_by: string | null;
   doa_approved_by: string | null;
+  invoice_id: string | null;
+  invoice_amount: string | null;
 }
 
 const STEP_QUERY = `
   SELECT st.id, st.requisition_id, st.step_no, st.assigned_user_id, st.decision, st.purpose,
          r.status AS req_status, r.reference AS req_reference, r.requester_id,
          r.cost_centre_id, r.category_id, r.amount, r.currency, r.doa_version_id,
-         dv.uploaded_by AS doa_uploaded_by, dv.approved_by AS doa_approved_by
+         dv.uploaded_by AS doa_uploaded_by, dv.approved_by AS doa_approved_by,
+         i.id AS invoice_id, i.amount AS invoice_amount
   FROM approval_steps st
   JOIN requisitions r ON r.id = st.requisition_id
   LEFT JOIN doa_matrix_versions dv ON dv.id = r.doa_version_id
+  LEFT JOIN invoices i ON i.reapproval_step_id = st.id
   WHERE st.id = $1
   FOR UPDATE OF st, r`;
+
+/** What approving this step would newly take out of the budget.
+ *  - DOA step: the requisition amount (nothing is committed pre-approval).
+ *  - Variance re-approval: only the excess beyond what the approval already
+ *    committed. The live position carries the approved amount in `committed`
+ *    already, so charging the requisition amount again double-counted the
+ *    same money — and showed the approver a number unrelated to the invoice
+ *    they were deciding (review finding).
+ */
+async function stepBudgetImpact(
+  client: Pick<pg.PoolClient, 'query'>,
+  step: { purpose: string; amount: string; requisition_id: string; invoice_amount?: string | null },
+): Promise<number> {
+  if (step.purpose !== 'variance_reapproval') return Number(step.amount);
+  const posted = await client.query<{ total: string }>(
+    `SELECT coalesce(sum(amount), 0)::text AS total FROM invoices
+     WHERE requisition_id = $1 AND status = 'posted'`,
+    [step.requisition_id],
+  );
+  const remainingCommitment = Math.max(0, Number(step.amount) - Number(posted.rows[0]!.total));
+  return Math.max(0, Number(step.invoice_amount ?? 0) - remainingCommitment);
+}
 
 export default async function approvalRoutes(app: FastifyInstance, opts: { db: Db; config: Config }) {
   const { db } = opts;
@@ -82,7 +109,11 @@ export default async function approvalRoutes(app: FastifyInstance, opts: { db: D
                                 AND prev.purpose = 'doa'
                                 AND prev.step_no < st.step_no
                                 AND prev.decision <> 'approved'))
-             OR (st.purpose = 'variance_reapproval' AND r.status IN ('approved', 'closed'))
+             -- The invoice must still be WAITING on this decision: Accounting
+             -- rejecting it resolves the matter, and the step must not linger
+             -- as a ghost work item (review finding).
+             OR (st.purpose = 'variance_reapproval' AND r.status IN ('approved', 'closed')
+                 AND i.status = 'pending_reapproval')
            )
          ORDER BY r.submitted_at NULLS LAST, st.step_no`,
         [user.id],
@@ -105,28 +136,44 @@ export default async function approvalRoutes(app: FastifyInstance, opts: { db: D
                 r.amount, r.currency, r.status AS requisition_status, r.needed_by,
                 r.cost_centre_id, r.category_id, r.doa_rule_snapshot, r.workflow_flags,
                 cc.code AS cost_centre_code, cat.code AS category_code, cat.name AS category_name,
-                u.display_name AS requester_name, s.name AS supplier_name
+                u.display_name AS requester_name, s.name AS supplier_name,
+                i.invoice_no, i.amount AS invoice_amount, i.variance_vs_approved,
+                i.status AS invoice_status
          FROM approval_steps st
          JOIN requisitions r ON r.id = st.requisition_id
          JOIN cost_centres cc ON cc.id = r.cost_centre_id
          JOIN categories cat ON cat.id = r.category_id
          JOIN users u ON u.id = r.requester_id
          LEFT JOIN suppliers s ON s.id = r.supplier_id
+         LEFT JOIN invoices i ON i.reapproval_step_id = st.id
          WHERE st.id = $1`,
         [params.data.id],
       );
       const row = step.rows[0] as
-        | { assigned_user_id: string; cost_centre_id: string; category_id: string; amount: string; [k: string]: unknown }
+        | {
+            assigned_user_id: string;
+            cost_centre_id: string;
+            category_id: string;
+            amount: string;
+            purpose: string;
+            requisition_id: string;
+            invoice_amount: string | null;
+            [k: string]: unknown;
+          }
         | undefined;
       if (!row) return null;
       const period = await currentPeriod(client);
       const budget = await categoryAvailable(client, row.cost_centre_id, row.category_id, period);
+      const impact = await stepBudgetImpact(client, row);
       return {
         step: row,
         budget: {
           period,
           available: budget.available.toFixed(2),
-          afterApproval: (budget.available - Number(row.amount)).toFixed(2),
+          afterApproval: (budget.available - impact).toFixed(2),
+          // For variance steps: the spend beyond the already-committed
+          // approval this decision would newly authorise.
+          incrementalImpact: impact.toFixed(2),
         },
       };
     });
@@ -242,10 +289,12 @@ export default async function approvalRoutes(app: FastifyInstance, opts: { db: D
         }
 
         // Budget impact recorded on the step (plan §4: the projected remaining
-        // balance the approver accepted).
+        // balance the approver accepted). For variance steps this is the
+        // incremental excess, not the full requisition amount (see
+        // stepBudgetImpact).
         const period = await currentPeriod(client);
         const budget = await categoryAvailable(client, step.cost_centre_id, step.category_id, period);
-        const projectedRemaining = budget.available - Number(step.amount);
+        const projectedRemaining = budget.available - (await stepBudgetImpact(client, step));
 
         await client.query(
           `UPDATE approval_steps
@@ -288,12 +337,47 @@ export default async function approvalRoutes(app: FastifyInstance, opts: { db: D
           // invoice Accounting already rejected must never be resurrected by
           // a later approval (adversarial-review finding — that rejection is
           // Accounting's own SoD-separated call).
-          const invoice = await client.query<{ id: string; invoice_no: string }>(
-            `UPDATE invoices SET status = $2
-             WHERE reapproval_step_id = $1 AND status = 'pending_reapproval'
-             RETURNING id, invoice_no`,
-            [step.id, kind === 'approve' ? 'submitted' : 'rejected'],
+          const invoice = await client.query<{ id: string; invoice_no: string; submitted_by: string | null }>(
+            kind === 'approve'
+              ? `UPDATE invoices SET status = 'submitted'
+                 WHERE reapproval_step_id = $1 AND status = 'pending_reapproval'
+                 RETURNING id, invoice_no, submitted_by`
+              : `UPDATE invoices
+                 SET status = 'rejected', rejected_by = $2, rejected_at = now(), rejection_reason = $3
+                 WHERE reapproval_step_id = $1 AND status = 'pending_reapproval'
+                 RETURNING id, invoice_no, submitted_by`,
+            kind === 'approve' ? [step.id] : [step.id, user.id, body.data.reason],
           );
+          // The decision resolves someone else's work item — tell them
+          // (review finding: this used to happen in complete silence).
+          const resolved = invoice.rows[0];
+          if (resolved?.submitted_by) {
+            await queueNotification(client, {
+              recipientUserId: resolved.submitted_by,
+              template:
+                kind === 'approve'
+                  ? NotificationTemplate.InvoiceReapprovalApproved
+                  : NotificationTemplate.InvoiceReapprovalRejected,
+              reference: step.req_reference,
+              deepLink: `/requisitions/${step.requisition_id}`,
+            });
+          }
+          if (resolved && kind === 'approve') {
+            // Accounting was waiting on this to post — tell them it is ready.
+            const accountants = await client.query<{ user_id: string }>(
+              `SELECT DISTINCT ra.user_id FROM roles_assignments ra
+               JOIN users u ON u.id = ra.user_id AND u.status = 'active'
+               WHERE ra.role = 'accounting' AND ra.revoked_at IS NULL`,
+            );
+            for (const a of accountants.rows) {
+              await queueNotification(client, {
+                recipientUserId: a.user_id,
+                template: NotificationTemplate.InvoiceReapprovalApproved,
+                reference: step.req_reference,
+                deepLink: '/accounting',
+              });
+            }
+          }
           await writeAudit(client, {
             actorUserId: user.id,
             action: AuditAction.InvoiceReapprovalDecided,

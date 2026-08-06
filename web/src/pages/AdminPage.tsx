@@ -452,7 +452,10 @@ function UsersSection() {
 export function AdminPage() {
   const { state } = useAuth();
   const me = state.status === "authenticated" ? state.user : null;
-  const isAdminish = hasRole(me, "sysadmin") || hasRole(me, "auditor") || hasRole(me, "doa_admin") || hasRole(me, "doa_approver");
+  // Sections render only for roles their APIs actually allow — a doa_approver
+  // opening Settings/Users saw nothing but "forbidden" alerts (review finding).
+  const seesDoa = ["doa_admin", "doa_approver", "auditor", "sysadmin"].some((r) => hasRole(me, r));
+  const seesAdministration = hasRole(me, "sysadmin") || hasRole(me, "auditor");
 
   return (
     <div>
@@ -460,12 +463,15 @@ export function AdminPage() {
       <p className="mt-1 text-sm text-slate-500">
         DOA versions, configurable settings, and access administration. The System Admin can never approve or touch financial records (A.5.3/A.8.2).
       </p>
-      <DoaSection />
-      {isAdminish ? (
+      {seesDoa ? <DoaSection /> : null}
+      {seesAdministration ? (
         <>
           <SettingsSection />
           <UsersSection />
         </>
+      ) : null}
+      {!seesDoa && !seesAdministration ? (
+        <EmptyState message="Your roles have no administration surface. DOA versions need doa_admin/doa_approver; settings and users need sysadmin or auditor." />
       ) : null}
     </div>
   );
