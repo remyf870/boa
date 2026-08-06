@@ -15,8 +15,13 @@ coverage/
 *.pfx
 secrets/
 
-# Local file storage (attachments live outside the repo)
+# Local file storage (attachments live outside the repo).
+# Uploaded files are business data — invoices are Confidential (A.5.12) — and
+# the quarantine subdirectory holds files that FAILED the malware scan (A.8.7).
+# Neither may ever enter version control. `data/` matches the default
+# ATTACHMENT_DIR (./data/attachments); production points elsewhere entirely.
 storage/
+data/
 
 # Logs
 *.log

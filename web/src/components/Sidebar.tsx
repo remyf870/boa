@@ -10,6 +10,7 @@ const NAV_ITEMS: NavItem[] = [
   { to: "/", label: "Dashboard", end: true },
   { to: "/requisitions", label: "Requisitions" },
   { to: "/approvals", label: "Approvals" },
+  { to: "/budgets", label: "Budgets" },
   { to: "/accounting", label: "Accounting" },
   { to: "/logbook", label: "Logbook" },
   { to: "/admin", label: "Admin" },

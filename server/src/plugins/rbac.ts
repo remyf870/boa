@@ -13,7 +13,9 @@ export type Role =
   | 'approver'
   | 'accounting'
   | 'budget_owner'
+  | 'budget_approver'
   | 'doa_admin'
+  | 'doa_approver'
   | 'auditor'
   | 'sysadmin';
 

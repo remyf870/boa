@@ -110,3 +110,130 @@ export async function createActors(db: pg.Pool): Promise<TestActors> {
     admRequisition,
   };
 }
+
+export interface WorkflowFixture extends TestActors {
+  /** Second-level approver (job title "Test Finance <RUN>"). */
+  approverB: string;
+  /** doa_admin (uploaded the active DOA version). */
+  doaAdmin: string;
+  /** doa_approver + budget_approver (activated DOA v1 and budget v1). */
+  fd: string;
+  accountant: string;
+  budgetOwner: string;
+  supplier: string;
+  doaVersionId: string;
+  budgetVersionId: string;
+  titleA: string;
+  titleB: string;
+}
+
+/**
+ * Extends createActors with everything the Phase 1-3 flows need: an ACTIVE
+ * DOA version (band 0-5000: approver A; 5000+: A → B, 1 quote required) and
+ * an ACTIVE budget (10000 for the test category) built through the §5.9
+ * governance walk. The base `approver` gets job title "Test Manager <RUN>".
+ */
+export async function createWorkflowFixture(db: pg.Pool): Promise<WorkflowFixture> {
+  const actors = await createActors(db);
+  const titleA = `Test Manager ${RUN}`;
+  const titleB = `Test Finance ${RUN}`;
+
+  await db.query('UPDATE users SET job_title = $2 WHERE id = $1', [actors.approver, titleA]);
+
+  const u = async (slug: string, name: string, title: string | null) =>
+    (
+      await db.query<{ id: string }>(
+        `INSERT INTO users (entra_object_id, email, display_name, job_title) VALUES ($1, $2, $3, $4) RETURNING id`,
+        [`dev-${slug}-${RUN}`, `${slug}-${RUN}@example.test`, name, title],
+      )
+    ).rows[0]!.id;
+  const approverB = await u('apprb', 'Second Approver', titleB);
+  const doaAdmin = await u('doaadm', 'DOA Admin', 'Compliance Officer');
+  const fd = await u('fd', 'Finance Director', 'Finance Director');
+  const accountant = await u('acct', 'Test Accountant', 'Accounts Clerk');
+  const budgetOwner = await u('bowner', 'Budget Owner', 'Financial Analyst');
+
+  const grant = (userId: string, role: string, costCentreId: string | null) =>
+    db.query(
+      `INSERT INTO roles_assignments (user_id, role, cost_centre_id, granted_by, granted_reason)
+       VALUES ($1, $2, $3, $4, 'test setup')`,
+      [userId, role, costCentreId, actors.sysadmin],
+    );
+  await grant(approverB, 'approver', actors.ccLea);
+  await grant(doaAdmin, 'doa_admin', null);
+  await grant(fd, 'doa_approver', null);
+  await grant(fd, 'budget_approver', null);
+  await grant(accountant, 'accounting', null);
+  await grant(budgetOwner, 'budget_owner', actors.ccLea);
+
+  const supplier = (
+    await db.query<{ id: string }>(
+      `INSERT INTO suppliers (name, cdk_vendor_ref) VALUES ($1, $2) RETURNING id`,
+      [`Test Supplier ${RUN}`, `CDK-T-${RUN}`],
+    )
+  ).rows[0]!.id;
+
+  // Active DOA: uploaded by doaAdmin, activated by fd (two-person rule)
+  const nextVersionNo = (
+    await db.query<{ n: number }>('SELECT coalesce(max(version_no), 0) + 1 AS n FROM doa_matrix_versions')
+  ).rows[0]!.n;
+  // Supersede any active version from another test file's fixture (one-active
+  // unique index) — safe: files sharing the DB create cc-scoped rules only.
+  await db.query(`UPDATE doa_matrix_versions SET status = 'superseded', effective_to = now() WHERE status = 'active'`);
+  const doaVersionId = (
+    await db.query<{ id: string }>(
+      `INSERT INTO doa_matrix_versions (version_no, status, effective_from, uploaded_by, approved_by, approved_at)
+       VALUES ($1, 'active', now(), $2, $3, now()) RETURNING id`,
+      [nextVersionNo, doaAdmin, fd],
+    )
+  ).rows[0]!.id;
+  const seqA = JSON.stringify([{ type: 'job_title', value: titleA, label: 'Dept Manager' }]);
+  const seqAB = JSON.stringify([
+    { type: 'job_title', value: titleA, label: 'Dept Manager' },
+    { type: 'job_title', value: titleB, label: 'Finance Manager' },
+  ]);
+  await db.query(
+    `INSERT INTO doa_rules (version_id, category_id, cost_centre_id, min_amount, max_amount, currency, approval_sequence, requires_quotes)
+     VALUES ($1, $2, $3, 0, 5000, 'TTD', $4, 0),
+            ($1, $2, $3, 5000, NULL, 'TTD', $5, 1)`,
+    [doaVersionId, actors.category, actors.ccLea, seqA, seqAB],
+  );
+
+  // Active budget 10000 via the governance walk (draft → pending → active)
+  const period = (
+    await db.query<{ p: string }>('SELECT fiscal_period_of(now()) AS p')
+  ).rows[0]!.p;
+  const budgetVersionId = (
+    await db.query<{ id: string }>(
+      `INSERT INTO budget_versions (cost_centre_id, period, version_no, reason, proposed_by)
+       VALUES ($1, $2, 1, 'test fixture budget', $3) RETURNING id`,
+      [actors.ccLea, period, budgetOwner],
+    )
+  ).rows[0]!.id;
+  await db.query(
+    `INSERT INTO budgets (cost_centre_id, category_id, period, amount, currency, version, version_id)
+     VALUES ($1, $2, $3, 10000, 'TTD', 1, $4)`,
+    [actors.ccLea, actors.category, period, budgetVersionId],
+  );
+  await db.query(`UPDATE budget_versions SET status = 'pending_approval', submitted_at = now() WHERE id = $1`, [
+    budgetVersionId,
+  ]);
+  await db.query(
+    `UPDATE budget_versions SET status = 'active', approved_by = $2, approved_at = now() WHERE id = $1`,
+    [budgetVersionId, fd],
+  );
+
+  return {
+    ...actors,
+    approverB,
+    doaAdmin,
+    fd,
+    accountant,
+    budgetOwner,
+    supplier,
+    doaVersionId,
+    budgetVersionId,
+    titleA,
+    titleB,
+  };
+}

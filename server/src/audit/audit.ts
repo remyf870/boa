@@ -21,6 +21,37 @@ export const AuditAction = {
   Export: 'data.export',
   ChainVerified: 'audit.chain.verified',
   ChainFailed: 'audit.chain.verification_failed',
+  // Phase 1 — requisition lifecycle & DOA
+  RequisitionCreated: 'requisition.created',
+  RequisitionUpdated: 'requisition.updated',
+  RequisitionSubmitted: 'requisition.submitted',
+  RequisitionCancelled: 'requisition.cancelled',
+  RequisitionApproved: 'requisition.approved', // final approval — reference issued
+  RequisitionDenied: 'requisition.denied',
+  ApprovalStepDecided: 'approval.step_decided',
+  SelfApprovalBlocked: 'approval.self_approval_blocked',
+  DoaConflictBlocked: 'approval.doa_conflict_blocked',
+  DelegationCreated: 'delegation.created',
+  DelegationRevoked: 'delegation.revoked',
+  DoaVersionUploaded: 'doa.version_uploaded',
+  DoaVersionActivated: 'doa.version_activated',
+  DoaActivationRefused: 'doa.activation_refused',
+  SettingChanged: 'setting.changed',
+  SlaReminderSent: 'approval.sla_reminder',
+  SlaEscalated: 'approval.sla_escalated',
+  // Phase 2 — budgets, files, invoices
+  BudgetVersionCreated: 'budget.version_created',
+  BudgetVersionSubmitted: 'budget.version_submitted',
+  BudgetVersionApproved: 'budget.version_approved',
+  BudgetVersionRejected: 'budget.version_rejected',
+  BudgetApprovalRefused: 'budget.approval_refused',
+  AttachmentUploaded: 'attachment.uploaded',
+  AttachmentQuarantined: 'attachment.quarantined',
+  AttachmentDownloaded: 'attachment.downloaded',
+  InvoiceSubmitted: 'invoice.submitted',
+  InvoiceReapprovalDecided: 'invoice.reapproval_decided',
+  // Phase 3 — accounting
+  InvoicePosted: 'invoice.posted',
 } as const;
 export type AuditActionName = (typeof AuditAction)[keyof typeof AuditAction];
 

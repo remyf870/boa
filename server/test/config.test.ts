@@ -36,8 +36,25 @@ describe('config (A.8.9 fail-fast, A.5.16 production auth)', () => {
       ENTRA_CLIENT_ID: 'c',
       ENTRA_CLIENT_SECRET: 's',
       OIDC_REDIRECT_URI: 'https://purchasing.massymotors.local/api/auth/callback',
+      SCANNER_MODE: 'clamd',
+      CLAMD_HOST: 'clamav.internal',
     });
     expect(cfg.AUTH_MODE).toBe('entra');
+  });
+
+  it('REFUSES the stub scanner in production (A.8.7)', () => {
+    expect(() =>
+      loadConfig({
+        ...base,
+        NODE_ENV: 'production',
+        APP_BASE_URL: 'https://purchasing.massymotors.local',
+        AUTH_MODE: 'entra',
+        ENTRA_TENANT_ID: 't',
+        ENTRA_CLIENT_ID: 'c',
+        ENTRA_CLIENT_SECRET: 's',
+        OIDC_REDIRECT_URI: 'https://purchasing.massymotors.local/api/auth/callback',
+      }),
+    ).toThrow(/SCANNER_MODE/);
   });
 
   it('rejects weak session secrets', () => {

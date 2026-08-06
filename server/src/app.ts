@@ -4,6 +4,7 @@
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify';
 import cookie from '@fastify/cookie';
 import helmet from '@fastify/helmet';
+import multipart from '@fastify/multipart';
 import rateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
 import path from 'node:path';
@@ -14,6 +15,14 @@ import authRoutes from './routes/auth.js';
 import meRoutes from './routes/me.js';
 import adminRoutes from './routes/admin.js';
 import requisitionRoutes from './routes/requisitions.js';
+import approvalRoutes from './routes/approvals.js';
+import doaRoutes from './routes/doa.js';
+import attachmentRoutes from './routes/attachments.js';
+import invoiceRoutes from './routes/invoices.js';
+import budgetRoutes from './routes/budgets.js';
+import accountingRoutes from './routes/accounting.js';
+import logbookRoutes from './routes/logbook.js';
+import dashboardRoutes from './routes/dashboard.js';
 
 export async function buildApp(config: Config, db: Db): Promise<FastifyInstance> {
   const app = Fastify({
@@ -60,12 +69,31 @@ export async function buildApp(config: Config, db: Db): Promise<FastifyInstance>
 
   await app.register(cookie, { secret: config.SESSION_SECRET });
 
+  // Uploads: one file per request. The transport ceiling is derived from the
+  // configured per-upload cap plus a small margin, so an oversized body is
+  // aborted while streaming rather than buffered in full and rejected
+  // afterwards — a 100 MB gap here let a single authenticated user exhaust
+  // memory (adversarial-review finding). The exact policy value is still
+  // enforced per route from app_settings (A.8.7).
+  await app.register(multipart, {
+    limits: { files: 1, fileSize: config.uploadTransportLimitBytes, fields: 10, fieldSize: 64 * 1024 },
+    attachFieldsToBody: false,
+  });
+
   await app.register(authContext, { db, config });
 
   await app.register(meRoutes, { db, config });
   await app.register(authRoutes, { db, config });
   await app.register(adminRoutes, { db, config });
   await app.register(requisitionRoutes, { db, config });
+  await app.register(approvalRoutes, { db, config });
+  await app.register(doaRoutes, { db, config });
+  await app.register(attachmentRoutes, { db, config });
+  await app.register(invoiceRoutes, { db, config });
+  await app.register(budgetRoutes, { db, config });
+  await app.register(accountingRoutes, { db, config });
+  await app.register(logbookRoutes, { db, config });
+  await app.register(dashboardRoutes, { db, config });
 
   // Serve the built SPA in production (same origin — no CORS surface at all)
   if (config.WEB_DIST_DIR) {

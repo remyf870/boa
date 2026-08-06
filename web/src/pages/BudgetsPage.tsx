@@ -1,0 +1,388 @@
+import { useEffect, useState } from "react";
+import { api } from "../api/client";
+import type { BudgetPosition, BudgetVersionDetail, BudgetVersionRow, ReferenceData } from "../api/types";
+import { hasRole } from "../api/types";
+import { useAuth } from "../components/AuthProvider";
+import { uploadFile, useApiQuery } from "../hooks/useApi";
+import { Button, EmptyState, ErrorNote, Field, formatDate, inputClass, Modal, Money, StatusBadge } from "../components/ui";
+
+/** §5.9 live tracker: the position streams over SSE and updates the moment a
+ * purchase is approved, an invoice posts, or a budget version activates. */
+function LivePosition({ costCentreId }: { costCentreId: string }) {
+  const [position, setPosition] = useState<BudgetPosition | null>(null);
+  const [live, setLive] = useState(false);
+
+  useEffect(() => {
+    setPosition(null);
+    const source = new EventSource(`/api/budgets/stream?costCentreId=${costCentreId}`);
+    source.addEventListener("position", (event) => {
+      setPosition(JSON.parse((event as MessageEvent).data) as BudgetPosition);
+      setLive(true);
+    });
+    source.onerror = () => setLive(false);
+    return () => source.close();
+  }, [costCentreId]);
+
+  if (!position) return <p className="mt-3 text-sm text-slate-500">Loading live position…</p>;
+
+  return (
+    <div className="mt-3 rounded-md border border-slate-200 bg-white">
+      <div className="flex items-center justify-between border-b border-slate-100 px-4 py-2">
+        <p className="text-sm font-medium text-slate-900">
+          Period {position.period}
+          {position.budgetVersionId === null ? <span className="ml-2 text-amber-700">— no approved budget for this period yet</span> : null}
+        </p>
+        <span className={`flex items-center gap-1.5 text-xs ${live ? "text-emerald-700" : "text-slate-400"}`}>
+          <span className={`inline-block h-2 w-2 rounded-full ${live ? "bg-emerald-500" : "bg-slate-300"}`} aria-hidden="true" />
+          {live ? "live" : "reconnecting…"}
+        </span>
+      </div>
+      <table className="w-full text-left text-sm">
+        <thead className="border-b border-slate-200 bg-slate-50 text-xs text-slate-500">
+          <tr>
+            {["Category", "Budget", "Committed", "Actual", "Available"].map((h) => (
+              <th key={h} className="px-4 py-2 font-medium">
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {position.categories.map((c) => (
+            <tr key={c.categoryId} className="border-b border-slate-100">
+              <td className="px-4 py-2">
+                {c.categoryCode} <span className="text-xs text-slate-400">{c.categoryName}</span>
+              </td>
+              <td className="px-4 py-2 tabular-nums">
+                <Money amount={c.budget} />
+              </td>
+              <td className="px-4 py-2 tabular-nums">
+                <Money amount={c.committed} />
+              </td>
+              <td className="px-4 py-2 tabular-nums">
+                <Money amount={c.actual} />
+              </td>
+              <td className="px-4 py-2 font-medium tabular-nums">
+                <Money amount={c.available} />
+              </td>
+            </tr>
+          ))}
+          <tr className="bg-slate-50 font-semibold">
+            <td className="px-4 py-2">Total</td>
+            <td className="px-4 py-2 tabular-nums">
+              <Money amount={position.totals.budget} />
+            </td>
+            <td className="px-4 py-2 tabular-nums">
+              <Money amount={position.totals.committed} />
+            </td>
+            <td className="px-4 py-2 tabular-nums">
+              <Money amount={position.totals.actual} />
+            </td>
+            <td className="px-4 py-2 tabular-nums">
+              <Money amount={position.totals.available} />
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <p className="border-t border-slate-100 px-4 py-2 text-[11px] text-slate-400">
+        Available = Budget − Committed − Actual. Committed the moment a purchase is finally approved; moved to Actual when its invoice posts.
+      </p>
+    </div>
+  );
+}
+
+function ProposeModal({
+  costCentreId,
+  period,
+  reference,
+  onClose,
+}: {
+  costCentreId: string;
+  period: string;
+  reference: ReferenceData;
+  onClose: (created: boolean) => void;
+}) {
+  const [reason, setReason] = useState("");
+  const [lines, setLines] = useState<Record<string, string>>({});
+  const [file, setFile] = useState<File | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      if (file) {
+        await uploadFile("/api/budgets/upload", file, { costCentreId, period, reason });
+      } else {
+        const lineItems = Object.entries(lines)
+          .filter(([, v]) => v !== "" && Number(v) >= 0)
+          .map(([categoryId, amount]) => ({ categoryId, amount: Number(amount) }));
+        if (lineItems.length === 0) throw new Error("Enter at least one category amount, or attach the Excel template.");
+        await api("/api/budgets/versions", { method: "POST", body: { costCentreId, period, reason, lines: lineItems } });
+      }
+      onClose(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not create the proposal");
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal title={`Propose budget — ${period}`} onClose={() => onClose(false)}>
+      <p className="text-sm text-slate-500">
+        The proposal becomes a draft version. After you submit it, a Budget Approver must approve it before it takes effect (§5.9). Nothing changes until then.
+      </p>
+      <div className="mt-3">
+        <Field label="Reason for this budget / change (mandatory)">
+          <textarea className={inputClass} rows={2} value={reason} onChange={(e) => setReason(e.target.value)} />
+        </Field>
+      </div>
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        {reference.categories.map((c) => (
+          <Field key={c.id} label={`${c.code} — ${c.name}`}>
+            <input
+              className={inputClass}
+              type="number"
+              min="0"
+              step="0.01"
+              value={lines[c.id] ?? ""}
+              onChange={(e) => setLines((l) => ({ ...l, [c.id]: e.target.value }))}
+              disabled={!!file}
+            />
+          </Field>
+        ))}
+      </div>
+      <div className="mt-3 flex items-center gap-3">
+        <a className="text-sm text-slate-700 underline underline-offset-2" href={`/api/budgets/template.xlsx?costCentreId=${costCentreId}&period=${period}`}>
+          Download Excel template
+        </a>
+        <span className="text-xs text-slate-400">or upload a completed one:</span>
+        <input type="file" accept=".xlsx" className="text-sm" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+      </div>
+      <ErrorNote message={error} />
+      <div className="mt-4 flex justify-end gap-2">
+        <Button onClick={() => onClose(false)}>Cancel</Button>
+        <Button kind="primary" disabled={busy || reason.trim().length < 3} onClick={() => void submit()}>
+          Create draft proposal
+        </Button>
+      </div>
+    </Modal>
+  );
+}
+
+function VersionDetailModal({ versionId, onClose }: { versionId: string; onClose: (changed: boolean) => void }) {
+  const { state } = useAuth();
+  const me = state.status === "authenticated" ? state.user : null;
+  const detail = useApiQuery<BudgetVersionDetail>(`/api/budgets/versions/${versionId}`);
+  const [reason, setReason] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const act = (path: string, body?: unknown) => async () => {
+    setError(null);
+    try {
+      await api(path, { method: "POST", body });
+      onClose(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Action failed");
+    }
+  };
+
+  if (detail.loading) {
+    return (
+      <Modal title="Budget version" onClose={() => onClose(false)}>
+        <p className="text-sm text-slate-500">Loading…</p>
+      </Modal>
+    );
+  }
+  if (!detail.data) {
+    return (
+      <Modal title="Budget version" onClose={() => onClose(false)}>
+        <ErrorNote message={detail.error ?? "Not found"} />
+      </Modal>
+    );
+  }
+  const v = detail.data.version;
+  const isProposer = me?.id === v.proposed_by;
+  const isApprover = hasRole(me, "budget_approver");
+
+  return (
+    <Modal title={`${v.cost_centre_code} ${v.period} — v${v.version_no}`} onClose={() => onClose(false)}>
+      <div className="flex items-center gap-2 text-sm">
+        <StatusBadge status={v.status} />
+        <span className="text-slate-500">
+          proposed by {v.proposed_by_name} · {formatDate(v.created_at)}
+        </span>
+      </div>
+      <p className="mt-2 text-sm text-slate-700">Reason: {v.reason}</p>
+      {v.rejection_reason ? <p className="mt-1 text-sm text-red-700">Rejected: {v.rejection_reason}</p> : null}
+
+      <h3 className="mt-4 text-sm font-semibold text-slate-900">Line-by-line change vs the active budget</h3>
+      <table className="mt-2 w-full text-left text-sm">
+        <thead className="border-b border-slate-200 bg-slate-50 text-xs text-slate-500">
+          <tr>
+            <th className="px-3 py-1.5 font-medium">Category</th>
+            <th className="px-3 py-1.5 font-medium">Current</th>
+            <th className="px-3 py-1.5 font-medium">Proposed</th>
+            <th className="px-3 py-1.5 font-medium">Change</th>
+          </tr>
+        </thead>
+        <tbody>
+          {detail.data.diff.map((d) => (
+            <tr key={d.categoryCode} className="border-b border-slate-100">
+              <td className="px-3 py-1.5">{d.categoryCode}</td>
+              <td className="px-3 py-1.5 tabular-nums">{d.before === null ? "—" : <Money amount={d.before} />}</td>
+              <td className="px-3 py-1.5 tabular-nums">{d.after === null ? "—" : <Money amount={d.after} />}</td>
+              <td className="px-3 py-1.5 text-xs">{d.change}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      <ErrorNote message={error} />
+      <div className="mt-4 flex flex-wrap justify-end gap-2">
+        {isProposer && v.status === "draft" ? (
+          <Button kind="primary" onClick={() => void act(`/api/budgets/versions/${v.id}/submit`)()}>
+            Submit for approval
+          </Button>
+        ) : null}
+        {isApprover && v.status === "pending_approval" && !isProposer ? (
+          <>
+            <div className="w-full">
+              <Field label="Rejection reason (only needed when rejecting)">
+                <input className={inputClass} value={reason} onChange={(e) => setReason(e.target.value)} />
+              </Field>
+            </div>
+            <Button kind="danger" onClick={() => void act(`/api/budgets/versions/${v.id}/reject`, { reason })()}>
+              Reject
+            </Button>
+            <Button kind="primary" onClick={() => void act(`/api/budgets/versions/${v.id}/approve`)()}>
+              Approve &amp; activate
+            </Button>
+          </>
+        ) : null}
+        <Button onClick={() => onClose(false)}>Close</Button>
+      </div>
+    </Modal>
+  );
+}
+
+export function BudgetsPage() {
+  const { state } = useAuth();
+  const me = state.status === "authenticated" ? state.user : null;
+  const reference = useApiQuery<ReferenceData>("/api/reference");
+  const [costCentreId, setCostCentreId] = useState<string>("");
+  const [showPropose, setShowPropose] = useState(false);
+  const [openVersion, setOpenVersion] = useState<string | null>(null);
+
+  // Only cost centres the signed-in roles can see budgets for (mirrors the
+  // server-side scope; the server remains authoritative).
+  const orgWide = ["accounting", "auditor", "budget_approver"].some((r) => hasRole(me, r));
+  const visibleCostCentres = (reference.data?.costCentres ?? []).filter(
+    (cc) =>
+      orgWide ||
+      ["requester", "approver", "budget_owner"].some((role) => hasRole(me, role, cc.id)),
+  );
+  const selected = costCentreId || visibleCostCentres[0]?.id || "";
+  const versions = useApiQuery<{ versions: BudgetVersionRow[] }>(selected ? `/api/budgets/versions?costCentreId=${selected}` : null);
+  const position = useApiQuery<BudgetPosition>(selected ? `/api/budget-position?costCentreId=${selected}` : null);
+  const period = position.data?.period ?? "";
+
+  const canPropose = me !== null && selected !== "" && hasRole(me, "budget_owner", selected);
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h1 className="text-lg font-semibold text-slate-900">Budgets</h1>
+          <p className="mt-1 text-sm text-slate-500">
+            Live position per cost centre. Budgets change only through approved versions (§5.9) — never by direct edit.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <select className={inputClass} value={selected} onChange={(e) => setCostCentreId(e.target.value)} aria-label="Cost centre">
+            {visibleCostCentres.map((cc) => (
+              <option key={cc.id} value={cc.id}>
+                {cc.code} — {cc.name}
+              </option>
+            ))}
+          </select>
+          {canPropose && period ? (
+            <Button kind="primary" onClick={() => setShowPropose(true)}>
+              Propose budget change
+            </Button>
+          ) : null}
+        </div>
+      </div>
+
+      {selected ? (
+        <LivePosition key={selected} costCentreId={selected} />
+      ) : (
+        <EmptyState message="Your roles have no budget visibility for any cost centre." />
+      )}
+
+      <h2 className="mt-6 text-base font-semibold text-slate-900">Versions</h2>
+      <ErrorNote message={versions.error} />
+      {versions.data && versions.data.versions.length === 0 ? <EmptyState message="No budget versions for this cost centre yet." /> : null}
+      {versions.data && versions.data.versions.length > 0 ? (
+        <div className="mt-2 overflow-x-auto rounded-md border border-slate-200 bg-white">
+          <table className="w-full min-w-[760px] text-left text-sm">
+            <thead className="border-b border-slate-200 bg-slate-50 text-xs text-slate-500">
+              <tr>
+                {["Period", "Version", "Status", "Total", "Proposed by", "Reason", "Approved by", ""].map((h) => (
+                  <th key={h} className="px-3 py-2 font-medium">
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {versions.data.versions.map((v) => (
+                <tr key={v.id} className="border-b border-slate-100 hover:bg-slate-50">
+                  <td className="px-3 py-2">{v.period}</td>
+                  <td className="px-3 py-2">v{v.version_no}</td>
+                  <td className="px-3 py-2">
+                    <StatusBadge status={v.status} />
+                  </td>
+                  <td className="px-3 py-2 tabular-nums">
+                    <Money amount={v.total_amount} />
+                  </td>
+                  <td className="px-3 py-2">{v.proposed_by_name}</td>
+                  <td className="max-w-[240px] truncate px-3 py-2 text-slate-500">{v.reason}</td>
+                  <td className="px-3 py-2">{v.approved_by_name ?? v.rejected_by_name ?? "—"}</td>
+                  <td className="px-3 py-2 text-right">
+                    <Button onClick={() => setOpenVersion(v.id)}>Open</Button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+
+      {showPropose && reference.data && period ? (
+        <ProposeModal
+          costCentreId={selected}
+          period={period}
+          reference={reference.data}
+          onClose={(created) => {
+            setShowPropose(false);
+            if (created) versions.refresh();
+          }}
+        />
+      ) : null}
+      {openVersion ? (
+        <VersionDetailModal
+          versionId={openVersion}
+          onClose={(changed) => {
+            setOpenVersion(null);
+            if (changed) {
+              versions.refresh();
+              position.refresh();
+            }
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}

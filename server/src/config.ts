@@ -28,6 +28,25 @@ const schema = z
     // Optional CA bundle path enabling verified TLS to PostgreSQL (A.8.24)
     DB_SSL_CA_FILE: z.string().optional(),
     LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error']).default('info'),
+    // A.8.7: private attachment store — never a statically served path
+    ATTACHMENT_DIR: z.string().default('./data/attachments'),
+    // A.8.7: 'clamd' (ClamAV daemon, required in production) or 'stub'
+    // (dev/test EICAR-only detector — refuses production, see superRefine)
+    SCANNER_MODE: z.enum(['clamd', 'stub']).default('stub'),
+    CLAMD_HOST: z.string().optional(),
+    CLAMD_PORT: z.coerce.number().int().min(1).max(65535).default(3310),
+    // Transport ceiling for uploads (A.8.7). Must stay >= the
+    // attachment_max_bytes app setting; bodies above it are aborted mid stream.
+    UPLOAD_TRANSPORT_LIMIT_MB: z.coerce.number().int().min(1).max(200).default(20),
+    // Notification delivery (plan §5.2 / A.5.14): 'smtp' sends via the
+    // internal relay; 'off' leaves messages in the outbox (dev/test, or until
+    // Massy IT provides the relay — ask-list; the outbox loses nothing).
+    EMAIL_MODE: z.enum(['off', 'smtp']).default('off'),
+    SMTP_HOST: z.string().optional(),
+    SMTP_PORT: z.coerce.number().int().min(1).max(65535).default(587),
+    SMTP_USER: z.string().optional(),
+    SMTP_PASS: z.string().optional(),
+    SMTP_FROM: z.string().optional(),
   })
   .superRefine((env, ctx) => {
     // A.5.16 / A.8.5: production authenticates via Entra ID only. The dev
@@ -59,6 +78,32 @@ const schema = z
         path: ['APP_BASE_URL'],
       });
     }
+    // A.8.7: the EICAR-only stub scanner must be impossible in production
+    if (env.NODE_ENV === 'production' && env.SCANNER_MODE !== 'clamd') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'SCANNER_MODE must be "clamd" in production (A.8.7 — real malware scanning is not optional)',
+        path: ['SCANNER_MODE'],
+      });
+    }
+    if (env.SCANNER_MODE === 'clamd' && !env.CLAMD_HOST) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'CLAMD_HOST is required when SCANNER_MODE=clamd',
+        path: ['CLAMD_HOST'],
+      });
+    }
+    if (env.EMAIL_MODE === 'smtp') {
+      for (const key of ['SMTP_HOST', 'SMTP_FROM'] as const) {
+        if (!env[key]) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `${key} is required when EMAIL_MODE=smtp`,
+            path: [key],
+          });
+        }
+      }
+    }
   });
 
 export type Config = z.infer<typeof schema> & {
@@ -67,6 +112,13 @@ export type Config = z.infer<typeof schema> & {
   bannerVersion: number;
   /** Parsed TRUST_PROXY: false, a hop count, or a proxy address list. */
   trustProxy: boolean | number | string[];
+  /**
+   * Transport-layer upload ceiling (A.8.7). Bodies above this are aborted mid
+   * stream instead of being buffered and then rejected. Set a little above the
+   * `attachment_max_bytes` setting so the route returns the precise policy
+   * error for normal overshoots; raise both together.
+   */
+  uploadTransportLimitBytes: number;
 };
 
 function parseTrustProxy(raw: string): boolean | number | string[] {
@@ -92,5 +144,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // Bump when the acceptable-use text changes; users re-acknowledge (A.5.10).
     bannerVersion: 1,
     trustProxy: parseTrustProxy(parsed.data.TRUST_PROXY),
+    // 20 MiB: the seeded attachment_max_bytes (15 MiB) plus headroom for
+    // multipart framing. Raising attachment_max_bytes past this needs
+    // UPLOAD_TRANSPORT_LIMIT_MB raised too.
+    uploadTransportLimitBytes: parsed.data.UPLOAD_TRANSPORT_LIMIT_MB * 1024 * 1024,
   };
 }

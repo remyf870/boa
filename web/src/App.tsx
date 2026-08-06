@@ -2,9 +2,15 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { AcceptableUseBanner } from "./components/AcceptableUseBanner";
 import { AppLayout } from "./components/AppLayout";
 import { AuthProvider, useAuth } from "./components/AuthProvider";
+import { AccountingPage } from "./pages/AccountingPage";
+import { AdminPage } from "./pages/AdminPage";
+import { ApprovalsPage } from "./pages/ApprovalsPage";
+import { BudgetsPage } from "./pages/BudgetsPage";
 import { DashboardPage } from "./pages/DashboardPage";
+import { LogbookPage } from "./pages/LogbookPage";
 import { LoginPage } from "./pages/LoginPage";
-import { PlaceholderPage } from "./pages/PlaceholderPage";
+import { RequisitionDetailPage } from "./pages/RequisitionDetailPage";
+import { RequisitionsPage } from "./pages/RequisitionsPage";
 
 function AuthGate() {
   const { state, acknowledgeBanner, reload } = useAuth();
@@ -54,11 +60,14 @@ function AuthGate() {
     <Routes>
       <Route element={<AppLayout />}>
         <Route index element={<DashboardPage />} />
-        <Route path="requisitions" element={<PlaceholderPage title="Requisitions" />} />
-        <Route path="approvals" element={<PlaceholderPage title="Approvals" />} />
-        <Route path="accounting" element={<PlaceholderPage title="Accounting" />} />
-        <Route path="logbook" element={<PlaceholderPage title="Logbook" />} />
-        <Route path="admin" element={<PlaceholderPage title="Admin" />} />
+        <Route path="requisitions" element={<RequisitionsPage />} />
+        <Route path="requisitions/:id" element={<RequisitionDetailPage />} />
+        <Route path="approvals" element={<ApprovalsPage />} />
+        <Route path="budgets" element={<BudgetsPage />} />
+        <Route path="budgets/versions/:id" element={<BudgetsPage />} />
+        <Route path="accounting" element={<AccountingPage />} />
+        <Route path="logbook" element={<LogbookPage />} />
+        <Route path="admin" element={<AdminPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

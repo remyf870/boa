@@ -68,10 +68,24 @@ Useful synthetic logins (all `@example.test`, all fake):
 | User | Roles |
 |---|---|
 | Riya Maharaj | Requester (Leasing) — has seeded requisitions |
-| Devon Charles | Approver (Leasing) |
-| Marcus Joseph | Accounting (org-wide) |
+| Devon Charles | Approver (Leasing) — Department Manager, first DOA level |
+| Anjali Singh | Approver (Leasing/Admin) — Finance Manager, second DOA level |
+| Priya Gopaul | Budget Owner (Leasing) — proposes budget versions (§5.9) |
+| Fiona Ramlogan | Budget Approver + DOA Approver — activates budgets and DOA versions (two-person rules) |
+| Marcus Joseph | Accounting (org-wide) — posting queue, CDK batch export |
+| Nigel Thomas | DOA Administrator — uploads DOA versions, cannot activate or approve |
 | Camille Baptiste | Auditor — the only role that can read the audit log |
 | Andre Williams | System Admin — deliberately sees **no** financial records (A.8.2) |
+
+Feature status: **Phases 0–3 are implemented** — requisition lifecycle with live DOA
+routing and budget preview, sequential approvals with delegation and SLA reminders,
+budget governance with a live budget tracker (§5.9), virus-scanned attachments,
+invoice submission with variance re-approval, accounting queue + exports, logbook,
+dashboard, and the masked Power BI reporting schema. Phase 4 (hardening/pen test/DR
+drill) and Phase 5 (pilot) remain.
+
+Operational jobs (run on a schedule in production): `npm run check-alerts`,
+`npm run send-notifications`, `npm run sla-reminders`, `npm run verify-audit-chain`.
 
 ### Troubleshooting
 

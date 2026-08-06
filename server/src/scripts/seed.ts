@@ -79,6 +79,11 @@ try {
   await grant(priya, 'budget_owner', ccLea);
   await grant(nigel, 'doa_admin', null);
   await grant(camille, 'auditor', null);
+  // §5.9 budget governance + §6.1 DOA activation: the Finance Director holds
+  // both org-wide approval roles. Who REALLY approves budgets is TODO(client)
+  // (plan §9 Q13, believed Board of Directors) — a grant change, not code.
+  await grant(fiona, 'budget_approver', null);
+  await grant(fiona, 'doa_approver', null);
 
   // ── Categories ───────────────────────────────────────────────────────────
   const cat = async (code: string, name: string, gl: string) =>
@@ -135,7 +140,18 @@ try {
     );
   }
 
-  // ── Budgets FY2026-Q3, LEA × category (structure is TODO(client), §9 Q3) ─
+  // ── Budgets FY2026-Q3, LEA × category — through the §5.9 governance walk:
+  //    the budget owner proposes a draft, submits it, the budget approver
+  //    (never the proposer — two-person rule) activates it. The state-machine
+  //    trigger forbids any shortcut straight to active.
+  const budgetVersion = (
+    await client.query<{ id: string }>(
+      `INSERT INTO budget_versions (cost_centre_id, period, version_no, reason, proposed_by)
+       VALUES ($1, 'FY2026-Q3', 1, 'Initial FY2026-Q3 budget (SYNTHETIC seed)', $2)
+       RETURNING id`,
+      [ccLea, priya],
+    )
+  ).rows[0]!.id;
   for (const [categoryId, amount] of [
     [catParts, 250000],
     [catFuel, 180000],
@@ -143,11 +159,19 @@ try {
     [catIt, 60000],
   ] as const) {
     await client.query(
-      `INSERT INTO budgets (cost_centre_id, category_id, period, amount, currency, version, approved_by, approved_at)
-       VALUES ($1, $2, 'FY2026-Q3', $3, 'TTD', 1, $4, now())`,
-      [ccLea, categoryId, amount, anjali],
+      `INSERT INTO budgets (cost_centre_id, category_id, period, amount, currency, version, version_id)
+       VALUES ($1, $2, 'FY2026-Q3', $3, 'TTD', 1, $4)`,
+      [ccLea, categoryId, amount, budgetVersion],
     );
   }
+  await client.query(
+    `UPDATE budget_versions SET status = 'pending_approval', submitted_at = now() WHERE id = $1`,
+    [budgetVersion],
+  );
+  await client.query(
+    `UPDATE budget_versions SET status = 'active', approved_by = $2, approved_at = now() WHERE id = $1`,
+    [budgetVersion, fiona],
+  );
 
   // ── Sample requisitions for the RBAC scope tests ─────────────────────────
   const ref1 = (await client.query<{ r: string }>("SELECT next_reference('LEA', 2026) AS r")).rows[0]!.r;

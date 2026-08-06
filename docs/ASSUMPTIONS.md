@@ -7,7 +7,7 @@
 > dated "Resolved" section.
 >
 > Document owner: Development team. Review cadence: at every phase gate, and whenever a client
-> answer arrives. Last updated: 2026-08-04.
+> answer arrives. Last updated: 2026-08-05.
 
 ---
 
@@ -27,6 +27,7 @@
 | 10 | **Existing PO numbering** — align Approval Reference with an existing PO series? | Reference format `MM-<DEPT>-<YYYY>-<seq>` (e.g. `MM-LEA-2026-0001`) per plan §5.3, with `-APR` suffix on the approval reference. **Alignment with any existing Massy PO series is unconfirmed**; the generator is isolated in one module so the format can change before pilot without touching business logic. `TODO(client)` | Awaiting client |
 | 11 | **Remote access** — can approvers act off-site; via VPN or Entra Private Access? | **Undecided — flagged.** Default position per plan §2 is none (office-only). Both candidate paths (existing corporate VPN vs Entra Private Access with Conditional Access) are documented; the app itself makes no assumption and requires no change either way. Must be settled **before go-live**. `TODO(client)` | Awaiting client |
 | 12 | **Power BI hosting** — Power BI Service (cloud) or Power BI Report Server (on-prem)? | **Undecided — flagged.** If Power BI Service is chosen, requisition/budget data leaves the organisational boundary → A.5.23 assessment and a `/docs/THIRD-PARTIES.md` entry become mandatory, and this interacts with Q7 data residency. Reporting views will mask PII (A.8.11) in either case. `TODO(client)` | Awaiting client |
+| 13 | **Budget approval authority** (plan §5.9) — who approves initial budgets and budget changes? One approval or a chain? | An org-wide **`budget_approver` role** is used; whoever the client names (Board of Directors is believed correct; possibly Finance Director for in-year changes) is granted the role — a data change, not a code change. Interim rule: **one approval by any budget_approver who is not the proposer** activates a budget version (two-person rule enforced by a DB CHECK). A multi-step chain, if required, is a follow-on change to the budget workflow only. `TODO(client)` | Awaiting client |
 
 ---
 
@@ -44,6 +45,21 @@ Each item below is what the build actually does today, and what changes when the
 - Assumed: budget rows are per quarter, per cost centre × category; unspent amounts do **not** carry forward.
 - `Available = Budget − Committed − Actual` is computed within the period only.
 - `TODO(client)` — confirm period, granularity, carry-forward (plan §9 Q3).
+
+### 2.2a Budget governance (plan §5.9) — approver identity, chain depth, commitment period
+- Assumed approver: the org-wide `budget_approver` role (see §1 Q13). Seeded in dev to the
+  synthetic Finance Director. One approval activates; two-person rule (proposer ≠ approver)
+  enforced by a DB CHECK. `TODO(client)` — confirm the real party (Board of Directors?) and
+  whether a multi-step chain is required (plan §9 Q13).
+- **Commitment period rule (adopted):** an approved requisition **commits against the budget
+  period containing its final-approval timestamp**; a posted invoice actualises in that same
+  requisition's commitment period. Rationale: the approval is the moment spend authority is
+  consumed. Alternative candidates (order date, delivery date, invoice date) are a
+  calculation-level change only. `TODO(client)` — confirm the period-attribution rule.
+- Live tracker semantics: `Committed` for a requisition = approved amount − amounts of its
+  posted invoices (never below zero); the residue is released when the requisition closes or
+  is cancelled. `Actual` = posted invoice amounts. Both are computed from base records on
+  every read — no stored running totals that can drift.
 
 ### 2.3 Approval routing — strictly sequential, no downward delegation
 - Assumed: sequential chain per plan §5.2; any denial ends the chain; denial reason mandatory; nothing is ever auto-approved.
@@ -123,6 +139,57 @@ Each item below is what the build actually does today, and what changes when the
 - A Supabase-hosted cloud Postgres instance is used **only** as a disposable development/test database, containing **synthetic data only** (A.8.33 — no production data ever exists to copy, and none will be copied when it does).
 - Production is **on-prem PostgreSQL 16** per plan §2. The Supabase project will be **decommissioned before go-live** and is listed in `/docs/THIRD-PARTIES.md` with that status.
 - No production secret, hostname, or credential is shared with the Supabase environment (A.8.31).
+
+### 2.17 DOA engine resolution rules (Phase 1 build decisions)
+- **Approver descriptors** in a DOA rule resolve only to ACTIVE users holding the **approver role
+  for the requisition's cost centre** — a job title alone never grants authority (A.5.15).
+- **Multiple candidates** for one descriptor: the engine deterministically picks the earliest
+  approver grant (then user id), records the alternatives in the frozen snapshot, and flags the
+  requisition (`multiple_candidates`). `TODO(client)` — confirm tie-break preference.
+- **Self-approval** (A.5.3): the requester is skipped at that level and the skip is flagged; if
+  the skips empty the chain, submission fails loudly (`unroutable_after_skips`) rather than
+  routing wrongly. A person appearing at two levels approves once (first occurrence, flagged).
+- **DOA activation role**: a dedicated org-wide `doa_approver` role (mapped to the Finance
+  Director per plan §6.1). SoD makes `doa_admin` + `doa_approver` structurally impossible to hold
+  together, so the two-person rule cannot be collapsed via role grants. `TODO(client)` — confirm
+  the Finance Director mapping.
+
+### 2.18 Phase 2/3 build decisions
+- **Quotes** count toward the §5.1 gate only when their virus scan verdict is `clean`, and can be
+  attached only while the requisition is a draft — what the approvers judged stays frozen.
+- **Requisition closure**: a requisition closes when its posted invoice total reaches the approved
+  amount; a partial posting leaves the remainder committed. `TODO(client)` — confirm.
+- **xlsx magic-byte limit** (A.8.7): xlsx is a ZIP container, so the byte check admits any ZIP;
+  import paths additionally require the file to parse as a real workbook, and everything is
+  scanned before use either way.
+- **Fiscal year start** is configurable (`fiscal_year_start_month`, default January = calendar
+  year). `TODO(client)` — Massy Group's fiscal year (October start?) changes this one setting,
+  no code.
+
+
+### 2.19 Adversarial review of Phases 1–3 (2026-08-05) — decisions taken while fixing
+A multi-agent adversarial review (six attack lenses, every finding independently refuted or
+confirmed against the code) surfaced 21 confirmed defects. All were fixed in migration
+`0010_review_fixes.sql` plus the corresponding routes, and each carries a regression test.
+Three of the fixes embed judgement calls worth recording:
+
+- **Invoice ceiling semantics.** Variance is now measured on the **cumulative** total of live
+  invoices, not per invoice (previously N invoices each within tolerance could post N× the
+  approved spend). A cumulative excess routes to variance re-approval per §5.4 — it is **not**
+  refused outright, because refusing would make the plan's re-approval path unreachable. The
+  database enforces the same rule: an invoice may only be `submitted`/`posted` above tolerance
+  when a variance re-approval was actually **granted** for it. `TODO(client)` — confirm that
+  re-approval (rather than a new requisition) is the right remedy for large overruns.
+- **DOA validation: errors vs warnings.** A rule that can route in *no* cost centre is an error
+  (upload refused). A rule that cannot route in *some* cost centres is a **warning**: it is shown
+  to the uploader, shown to the second-person reviewer before activation, and recorded in the
+  activation audit entry — but it does not block, because plan §1 pilots Leasing first and cost
+  centres without approvers yet are expected. `TODO(client)` — confirm this is the wanted
+  behaviour once the rollout goes beyond Leasing.
+- **Budget periods are quarterly-only.** `FY2026` (annual) previously passed validation but could
+  never match a requisition, so the budget was invisible while commitments accrued. Until §9 Q3 is
+  answered, the CHECK and the API accept only the quarterly form the resolver produces. Supporting
+  annual budgets means changing `fiscal_period_of`, the CHECKs and the API patterns together.
 
 ---
 

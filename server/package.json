@@ -20,25 +20,32 @@
     "seed": "tsx src/scripts/seed.ts",
     "verify-audit-chain": "tsx src/scripts/verify-audit-chain.ts",
     "check-alerts": "tsx src/scripts/check-alerts.ts",
+    "send-notifications": "tsx src/scripts/send-notifications.ts",
+    "sla-reminders": "tsx src/scripts/sla-reminders.ts",
     "provision-breakglass": "tsx src/scripts/provision-breakglass.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.1",
     "@fastify/helmet": "^13.0.0",
+    "@fastify/multipart": "^10.1.0",
     "@fastify/rate-limit": "^10.1.1",
-    "@fastify/static": "^8.0.3",
+    "@fastify/static": "^10.1.2",
     "@node-rs/argon2": "^2.0.2",
     "dotenv": "^16.4.7",
     "exceljs": "^4.4.0",
     "fastify": "^5.2.0",
     "fastify-plugin": "^6.0.0",
+    "nodemailer": "^9.0.4",
     "openid-client": "^6.1.7",
     "otplib": "^12.0.1",
+    "pdfkit": "^0.19.1",
     "pg": "^8.13.1",
     "zod": "^3.24.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "@types/nodemailer": "^8.0.1",
+    "@types/pdfkit": "^0.17.6",
     "@types/pg": "^8.11.10",
     "embedded-postgres": "^18.4.0-beta.17",
     "eslint": "^9.17.0",
@@ -46,7 +53,7 @@
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.18.1",
-    "vitest": "^2.1.8"
+    "vitest": "^4.1.10"
   },
   "allowScripts": {
     "esbuild@0.28.1": true,

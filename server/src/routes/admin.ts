@@ -9,8 +9,19 @@ import { withUserContext, type Db } from '../db/pool.js';
 import { AuditAction, raiseAlert, verifyAuditChain, writeAudit } from '../audit/audit.js';
 import { buildLabelledWorkbook } from '../exports/excel.js';
 import { requireRoles } from '../plugins/rbac.js';
+import { SETTING_KEYS, SettingValidationError, writeSetting, type SettingKey } from '../settings.js';
 
-const ROLE_VALUES = ['requester', 'approver', 'accounting', 'budget_owner', 'doa_admin', 'auditor', 'sysadmin'] as const;
+const ROLE_VALUES = [
+  'requester',
+  'approver',
+  'accounting',
+  'budget_owner',
+  'budget_approver',
+  'doa_admin',
+  'doa_approver',
+  'auditor',
+  'sysadmin',
+] as const;
 
 export default async function adminRoutes(app: FastifyInstance, opts: { db: Db; config: Config }) {
   const { db } = opts;
@@ -83,7 +94,7 @@ export default async function adminRoutes(app: FastifyInstance, opts: { db: Db; 
         // Org-wide roles are org-wide, full stop (mirrors the DB CHECK
         // org_wide_roles_have_no_cost_centre): a "scoped sysadmin/auditor"
         // would satisfy org-wide role checks with over-broad effect.
-        if (['sysadmin', 'auditor', 'accounting', 'doa_admin'].includes(b.role) && b.costCentreId) {
+        if (['sysadmin', 'auditor', 'accounting', 'doa_admin', 'budget_approver', 'doa_approver'].includes(b.role) && b.costCentreId) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
             message: `${b.role} is an organisation-wide role and cannot be scoped to a cost centre`,
@@ -318,4 +329,248 @@ export default async function adminRoutes(app: FastifyInstance, opts: { db: Db; 
     }
     return result;
   });
+
+  // ── Audit trail export for a date range (A.5.28 packaged evidence) ─────────
+  app.get(
+    '/api/admin/audit-export.xlsx',
+    { preHandler: requireRoles(db, 'auditor'), config: { rateLimit: { max: 10, timeWindow: '1 hour' } } },
+    async (req, reply) => {
+      const actor = req.currentUser!;
+      const query = z
+        .object({ from: z.coerce.date(), to: z.coerce.date() })
+        .refine((q) => q.to > q.from, { message: 'to must be after from' })
+        .safeParse(req.query);
+      if (!query.success) return reply.code(400).send({ error: 'invalid_request' });
+
+      const rows = await withUserContext(db, actor.id, async (client) => {
+        const result = await client.query<Record<string, unknown>>(
+          `SELECT seq, occurred_at, actor_user_id, action, entity_type, entity_id,
+                  before, after, ip_address, user_agent, prev_hash, row_hash
+           FROM audit_log
+           WHERE occurred_at >= $1 AND occurred_at < $2
+           ORDER BY seq
+           LIMIT 50000`,
+          [query.data.from, query.data.to],
+        );
+        return result.rows;
+      });
+      const filterDescription = `occurred_at in [${query.data.from.toISOString()}, ${query.data.to.toISOString()})`;
+      const buffer = await buildLabelledWorkbook({
+        title: 'Audit trail',
+        classification: 'Confidential',
+        exportedBy: `${actor.displayName} <${actor.email}>`,
+        filterDescription,
+        columns: [
+          { header: 'Seq', key: 'seq', width: 10 },
+          { header: 'Occurred (UTC)', key: 'occurred_at', width: 24 },
+          { header: 'Actor', key: 'actor_user_id', width: 38 },
+          { header: 'Action', key: 'action', width: 28 },
+          { header: 'Entity type', key: 'entity_type', width: 18 },
+          { header: 'Entity id', key: 'entity_id', width: 38 },
+          { header: 'Before', key: 'before', width: 40 },
+          { header: 'After', key: 'after', width: 40 },
+          { header: 'IP', key: 'ip_address', width: 16 },
+          { header: 'Prev hash', key: 'prev_hash', width: 20 },
+          { header: 'Row hash', key: 'row_hash', width: 20 },
+        ],
+        rows: rows.map((r) => ({
+          ...r,
+          occurred_at: r.occurred_at instanceof Date ? r.occurred_at.toISOString() : r.occurred_at,
+          before: r.before === null ? '' : JSON.stringify(r.before),
+          after: r.after === null ? '' : JSON.stringify(r.after),
+        })),
+      });
+      await writeAudit(db, {
+        actorUserId: actor.id,
+        action: AuditAction.Export,
+        entityType: 'export',
+        entityId: 'audit-trail',
+        after: { rowCount: rows.length, filter: filterDescription, format: 'xlsx' },
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent'] ?? null,
+      });
+      return reply
+        .header('content-disposition', 'attachment; filename="audit-trail.xlsx"')
+        .type('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        .send(buffer);
+    },
+  );
+
+  // ── App settings (plan §0.3: configurable = data in the DB) ────────────────
+  app.get('/api/admin/settings', { preHandler: requireRoles(db, 'sysadmin', 'auditor') }, async () => {
+    const { rows } = await db.query(
+      'SELECT key, value, description, updated_by, updated_at FROM app_settings ORDER BY key',
+    );
+    return { settings: rows };
+  });
+
+  app.put('/api/admin/settings/:key', { preHandler: requireRoles(db, 'sysadmin') }, async (req, reply) => {
+    const actor = req.currentUser!;
+    const params = z
+      .object({ key: z.enum(SETTING_KEYS as [SettingKey, ...SettingKey[]]) })
+      .safeParse(req.params);
+    if (!params.success) return reply.code(404).send({ error: 'not_found' });
+    const body = z.object({ value: z.unknown() }).safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: 'invalid_request' });
+
+    try {
+      const change = await withUserContext(db, actor.id, async (client) => {
+        const result = await writeSetting(client, params.data.key, body.data.value, actor.id);
+        await writeAudit(client, {
+          actorUserId: actor.id,
+          action: AuditAction.SettingChanged,
+          entityType: 'app_setting',
+          entityId: params.data.key,
+          before: { value: result.before },
+          after: { value: result.after },
+          ipAddress: req.ip,
+          userAgent: req.headers['user-agent'] ?? null,
+        });
+        return result;
+      });
+      return { ok: true, key: params.data.key, value: change.after };
+    } catch (err) {
+      if (err instanceof SettingValidationError) {
+        return reply.code(400).send({ error: 'invalid_setting_value', message: err.message });
+      }
+      throw err;
+    }
+  });
+
+  // ── Master data maintenance (plan §5.8): categories, cost centres, suppliers ─
+  app.post('/api/admin/categories', { preHandler: requireRoles(db, 'sysadmin') }, async (req, reply) => {
+    const actor = req.currentUser!;
+    const body = z
+      .object({
+        code: z.string().min(1).max(30).transform((s) => s.toUpperCase()),
+        name: z.string().min(1).max(200),
+        glAccountCode: z.string().max(30).nullish(),
+        cdkAccountRef: z.string().max(30).nullish(),
+      })
+      .safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: 'invalid_request' });
+    try {
+      const { rows } = await db.query<{ id: string }>(
+        `INSERT INTO categories (code, name, gl_account_code, cdk_account_ref)
+         VALUES ($1, $2, $3, $4) RETURNING id`,
+        [body.data.code, body.data.name, body.data.glAccountCode ?? null, body.data.cdkAccountRef ?? null],
+      );
+      await writeAudit(db, {
+        actorUserId: actor.id,
+        action: 'category.created',
+        entityType: 'category',
+        entityId: rows[0]!.id,
+        after: body.data,
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent'] ?? null,
+      });
+      return reply.code(201).send({ ok: true, id: rows[0]!.id });
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('categories_code_key')) {
+        return reply.code(409).send({ error: 'code_already_exists' });
+      }
+      throw err;
+    }
+  });
+
+  app.post('/api/admin/cost-centres', { preHandler: requireRoles(db, 'sysadmin') }, async (req, reply) => {
+    const actor = req.currentUser!;
+    const body = z
+      .object({
+        code: z.string().min(1).max(30).transform((s) => s.toUpperCase()),
+        name: z.string().min(1).max(200),
+        department: z.string().min(1).max(100),
+        parentId: z.string().uuid().nullish(),
+      })
+      .safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: 'invalid_request' });
+    try {
+      const { rows } = await db.query<{ id: string }>(
+        `INSERT INTO cost_centres (code, name, department, parent_id)
+         VALUES ($1, $2, $3, $4) RETURNING id`,
+        [body.data.code, body.data.name, body.data.department, body.data.parentId ?? null],
+      );
+      await writeAudit(db, {
+        actorUserId: actor.id,
+        action: 'cost_centre.created',
+        entityType: 'cost_centre',
+        entityId: rows[0]!.id,
+        after: body.data,
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent'] ?? null,
+      });
+      return reply.code(201).send({ ok: true, id: rows[0]!.id });
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('cost_centres_code_key')) {
+        return reply.code(409).send({ error: 'code_already_exists' });
+      }
+      throw err;
+    }
+  });
+
+  app.post('/api/admin/suppliers', { preHandler: requireRoles(db, 'sysadmin') }, async (req, reply) => {
+    const actor = req.currentUser!;
+    // A.5.34: deliberately no bank/payment fields — they belong in CDK
+    const body = z
+      .object({
+        name: z.string().min(1).max(200),
+        cdkVendorRef: z.string().max(30).nullish(),
+        taxId: z.string().max(30).nullish(),
+      })
+      .safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: 'invalid_request' });
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO suppliers (name, cdk_vendor_ref, tax_id) VALUES ($1, $2, $3) RETURNING id`,
+      [body.data.name, body.data.cdkVendorRef ?? null, body.data.taxId ?? null],
+    );
+    await writeAudit(db, {
+      actorUserId: actor.id,
+      action: 'supplier.created',
+      entityType: 'supplier',
+      entityId: rows[0]!.id,
+      after: body.data,
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'] ?? null,
+    });
+    return reply.code(201).send({ ok: true, id: rows[0]!.id });
+  });
+
+  // Deactivation is a flag, never a delete (A.5.33)
+  app.post(
+    '/api/admin/:entity(categories|cost-centres|suppliers)/:id/active',
+    { preHandler: requireRoles(db, 'sysadmin') },
+    async (req, reply) => {
+      const actor = req.currentUser!;
+      const params = z
+        .object({ entity: z.enum(['categories', 'cost-centres', 'suppliers']), id: z.string().uuid() })
+        .safeParse(req.params);
+      const body = z.object({ active: z.boolean() }).safeParse(req.body);
+      if (!params.success || !body.success) return reply.code(400).send({ error: 'invalid_request' });
+
+      const table =
+        params.data.entity === 'categories'
+          ? 'categories'
+          : params.data.entity === 'cost-centres'
+            ? 'cost_centres'
+            : 'suppliers';
+      const result =
+        table === 'suppliers'
+          ? await db.query(`UPDATE suppliers SET status = $2 WHERE id = $1`, [
+              params.data.id,
+              body.data.active ? 'active' : 'inactive',
+            ])
+          : await db.query(`UPDATE ${table} SET active = $2 WHERE id = $1`, [params.data.id, body.data.active]);
+      if ((result.rowCount ?? 0) === 0) return reply.code(404).send({ error: 'not_found' });
+      await writeAudit(db, {
+        actorUserId: actor.id,
+        action: `${table}.active_changed`,
+        entityType: table,
+        entityId: params.data.id,
+        after: { active: body.data.active },
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent'] ?? null,
+      });
+      return { ok: true };
+    },
+  );
 }

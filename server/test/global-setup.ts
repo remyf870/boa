@@ -3,7 +3,7 @@
 // the integration suite always runs. Synthetic data only, either way (A.8.33).
 import path from 'node:path';
 import { rm } from 'node:fs/promises';
-import type { GlobalSetupContext } from 'vitest/node';
+import type { TestProject } from 'vitest/node';
 
 declare module 'vitest' {
   export interface ProvidedContext {
@@ -14,7 +14,7 @@ declare module 'vitest' {
 const PORT = 5439;
 const DATA_DIR = path.resolve(import.meta.dirname, '../.pgdata-test');
 
-export default async function setup({ provide }: GlobalSetupContext): Promise<(() => Promise<void>) | void> {
+export default async function setup({ provide }: TestProject): Promise<(() => Promise<void>) | void> {
   const provided = process.env.DATABASE_URL;
   if (provided) {
     provide('databaseUrl', provided);
