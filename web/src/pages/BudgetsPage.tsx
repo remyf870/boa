@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../api/client";
 import type { BudgetPosition, BudgetVersionDetail, BudgetVersionRow, ReferenceData } from "../api/types";
 import { hasRole } from "../api/types";
@@ -108,18 +109,34 @@ function ProposeModal({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const submit = async () => {
+  /** `sendForApproval` is the default action: creating a draft nobody is told
+   * to submit was a dead-end — the proposal simply sat there while the
+   * approver saw a version with no available action. */
+  const submit = async (sendForApproval: boolean) => {
     setBusy(true);
     setError(null);
     try {
+      let versionId: string;
       if (file) {
-        await uploadFile("/api/budgets/upload", file, { costCentreId, period, reason });
+        const created = await uploadFile<{ versionId: string }>("/api/budgets/upload", file, {
+          costCentreId,
+          period,
+          reason,
+        });
+        versionId = created.versionId;
       } else {
         const lineItems = Object.entries(lines)
           .filter(([, v]) => v !== "" && Number(v) >= 0)
           .map(([categoryId, amount]) => ({ categoryId, amount: Number(amount) }));
         if (lineItems.length === 0) throw new Error("Enter at least one category amount, or attach the Excel template.");
-        await api("/api/budgets/versions", { method: "POST", body: { costCentreId, period, reason, lines: lineItems } });
+        const created = await api<{ versionId: string }>("/api/budgets/versions", {
+          method: "POST",
+          body: { costCentreId, period, reason, lines: lineItems },
+        });
+        versionId = created.versionId;
+      }
+      if (sendForApproval) {
+        await api(`/api/budgets/versions/${versionId}/submit`, { method: "POST" });
       }
       onClose(true);
     } catch (err) {
@@ -161,12 +178,18 @@ function ProposeModal({
         <input type="file" accept=".xlsx" className="text-sm" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
       </div>
       <ErrorNote message={error} />
-      <div className="mt-4 flex justify-end gap-2">
+      <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
         <Button onClick={() => onClose(false)}>Cancel</Button>
-        <Button kind="primary" disabled={busy || reason.trim().length < 3} onClick={() => void submit()}>
-          Create draft proposal
+        <Button disabled={busy || reason.trim().length < 3} onClick={() => void submit(false)}>
+          Save as draft
+        </Button>
+        <Button kind="primary" disabled={busy || reason.trim().length < 3} onClick={() => void submit(true)}>
+          Submit for approval
         </Button>
       </div>
+      <p className="mt-2 text-right text-xs text-slate-400">
+        A draft stays with you until you submit it — only a submitted proposal reaches a Budget Approver.
+      </p>
     </Modal>
   );
 }
@@ -239,6 +262,26 @@ function VersionDetailModal({ versionId, onClose }: { versionId: string; onClose
         </tbody>
       </table>
 
+      {/* Every state says what it is waiting for and who owns the next move,
+          so nobody opens a version and finds an unexplained dead-end. */}
+      <p className="mt-4 rounded border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+        {v.status === "draft"
+          ? isProposer
+            ? "This proposal is still a draft. It has not reached a Budget Approver — submit it below."
+            : `Still a draft with ${v.proposed_by_name}. It has not been submitted for approval yet, so there is nothing to approve.`
+          : v.status === "pending_approval"
+            ? isProposer
+              ? "Submitted and awaiting a Budget Approver. You cannot approve your own proposal (two-person rule)."
+              : isApprover
+                ? "Awaiting your decision."
+                : "Awaiting a Budget Approver's decision."
+            : v.status === "active"
+              ? "Approved and active — this is the budget the live position is measured against."
+              : v.status === "rejected"
+                ? "Rejected. Propose a new version to try again; this one is kept as a record."
+                : "Superseded by a later approved version, and kept as a record."}
+      </p>
+
       <ErrorNote message={error} />
       <div className="mt-4 flex flex-wrap justify-end gap-2">
         {isProposer && v.status === "draft" ? (
@@ -273,7 +316,10 @@ export function BudgetsPage() {
   const reference = useApiQuery<ReferenceData>("/api/reference");
   const [costCentreId, setCostCentreId] = useState<string>("");
   const [showPropose, setShowPropose] = useState(false);
-  const [openVersion, setOpenVersion] = useState<string | null>(null);
+  // Notification deep links are /budgets/versions/:id — open that version
+  // directly instead of dropping the recipient on the page with no context.
+  const { id: linkedVersionId } = useParams<{ id: string }>();
+  const [openVersion, setOpenVersion] = useState<string | null>(linkedVersionId ?? null);
 
   // Only cost centres the signed-in roles can see budgets for (mirrors the
   // server-side scope; the server remains authoritative).
@@ -288,7 +334,25 @@ export function BudgetsPage() {
   const position = useApiQuery<BudgetPosition>(selected ? `/api/budget-position?costCentreId=${selected}` : null);
   const period = position.data?.period ?? "";
 
+  const navigate = useNavigate();
   const canPropose = me !== null && selected !== "" && hasRole(me, "budget_owner", selected);
+  const isBudgetApprover = hasRole(me, "budget_approver");
+  // Org-wide: everything waiting on this approver, across ALL cost centres —
+  // the whole point is that they should not have to hunt for it.
+  const awaiting = useApiQuery<{ versions: BudgetVersionRow[] }>(
+    isBudgetApprover ? "/api/budgets/versions?status=pending_approval" : null,
+  );
+  const awaitingMine = (awaiting.data?.versions ?? []).filter((v) => v.proposed_by_name !== me?.displayName);
+  // A proposer's own drafts are equally easy to forget about.
+  const myDrafts = (versions.data?.versions ?? []).filter(
+    (v) => v.status === "draft" && v.proposed_by_name === me?.displayName,
+  );
+
+  const refreshAll = () => {
+    versions.refresh();
+    position.refresh();
+    awaiting.refresh();
+  };
 
   return (
     <div>
@@ -314,6 +378,53 @@ export function BudgetsPage() {
           ) : null}
         </div>
       </div>
+
+      {awaitingMine.length > 0 ? (
+        <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3">
+          <p className="text-sm font-medium text-amber-900">
+            {awaitingMine.length} budget proposal{awaitingMine.length > 1 ? "s" : ""} awaiting your approval
+          </p>
+          <ul className="mt-2 space-y-1">
+            {awaitingMine.map((v) => (
+              <li key={v.id} className="flex flex-wrap items-center justify-between gap-2 text-sm text-amber-900">
+                <span>
+                  <span className="font-medium">
+                    {v.cost_centre_code} {v.period} v{v.version_no}
+                  </span>{" "}
+                  · <Money amount={v.total_amount} /> · proposed by {v.proposed_by_name} — {v.reason}
+                </span>
+                <Button kind="primary" onClick={() => setOpenVersion(v.id)}>
+                  Review
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {myDrafts.length > 0 ? (
+        <div className="mt-4 rounded-md border border-sky-200 bg-sky-50 p-3">
+          <p className="text-sm font-medium text-sky-900">
+            You have {myDrafts.length} unsubmitted draft{myDrafts.length > 1 ? "s" : ""} — a draft never reaches an
+            approver until you submit it.
+          </p>
+          <ul className="mt-2 space-y-1">
+            {myDrafts.map((v) => (
+              <li key={v.id} className="flex flex-wrap items-center justify-between gap-2 text-sm text-sky-900">
+                <span>
+                  <span className="font-medium">
+                    {v.period} v{v.version_no}
+                  </span>{" "}
+                  · <Money amount={v.total_amount} /> — {v.reason}
+                </span>
+                <Button kind="primary" onClick={() => setOpenVersion(v.id)}>
+                  Submit for approval
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       {selected ? (
         <LivePosition key={selected} costCentreId={selected} />
@@ -351,7 +462,23 @@ export function BudgetsPage() {
                   <td className="max-w-[240px] truncate px-3 py-2 text-slate-500">{v.reason}</td>
                   <td className="px-3 py-2">{v.approved_by_name ?? v.rejected_by_name ?? "—"}</td>
                   <td className="px-3 py-2 text-right">
-                    <Button onClick={() => setOpenVersion(v.id)}>Open</Button>
+                    {/* The label names the action the viewer can actually take
+                        in this state, so no row is an unexplained "Open". */}
+                    <Button
+                      kind={
+                        (v.status === "draft" && v.proposed_by_name === me?.displayName) ||
+                        (v.status === "pending_approval" && isBudgetApprover && v.proposed_by_name !== me?.displayName)
+                          ? "primary"
+                          : "secondary"
+                      }
+                      onClick={() => setOpenVersion(v.id)}
+                    >
+                      {v.status === "draft" && v.proposed_by_name === me?.displayName
+                        ? "Submit"
+                        : v.status === "pending_approval" && isBudgetApprover && v.proposed_by_name !== me?.displayName
+                          ? "Review"
+                          : "Open"}
+                    </Button>
                   </td>
                 </tr>
               ))}
@@ -367,7 +494,7 @@ export function BudgetsPage() {
           reference={reference.data}
           onClose={(created) => {
             setShowPropose(false);
-            if (created) versions.refresh();
+            if (created) refreshAll();
           }}
         />
       ) : null}
@@ -376,10 +503,10 @@ export function BudgetsPage() {
           versionId={openVersion}
           onClose={(changed) => {
             setOpenVersion(null);
-            if (changed) {
-              versions.refresh();
-              position.refresh();
-            }
+            // Deep-linked opens land on /budgets/versions/:id; returning to
+            // /budgets keeps the URL honest once the modal is dismissed.
+            if (linkedVersionId) navigate("/budgets", { replace: true });
+            if (changed) refreshAll();
           }}
         />
       ) : null}

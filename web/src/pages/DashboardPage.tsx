@@ -32,6 +32,18 @@ export function DashboardPage() {
             <Tile title="My open requisitions" value={dashboard.data.myOpenRequisitions} to="/requisitions" />
             <Tile title="Denied this month" value={dashboard.data.deniedThisMonth} to="/logbook" tone={dashboard.data.deniedThisMonth > 0 ? "danger" : undefined} />
           </div>
+          {/* Governance approvals (§5.9, §6.1) are their own queues — shown
+              only to the roles that can act on them. */}
+          {dashboard.data.pendingBudgetApprovals > 0 || dashboard.data.pendingDoaActivations > 0 ? (
+            <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+              {dashboard.data.pendingBudgetApprovals > 0 ? (
+                <Tile title="Budget proposals awaiting my approval" value={dashboard.data.pendingBudgetApprovals} to="/budgets" />
+              ) : null}
+              {dashboard.data.pendingDoaActivations > 0 ? (
+                <Tile title="DOA versions awaiting my activation" value={dashboard.data.pendingDoaActivations} to="/admin" />
+              ) : null}
+            </div>
+          ) : null}
           <h2 className="mt-6 text-sm font-medium text-slate-600">Budget position by cost centre (live figures on the Budgets page)</h2>
           <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
             {dashboard.data.budgetPositions.map((b) => (

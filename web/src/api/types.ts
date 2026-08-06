@@ -289,6 +289,8 @@ export interface DashboardData {
   pendingMyApproval: number;
   myOpenRequisitions: number;
   deniedThisMonth: number;
+  pendingBudgetApprovals: number;
+  pendingDoaActivations: number;
   budgetPositions: {
     costCentreId: string;
     costCentreCode: string;

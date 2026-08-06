@@ -3,8 +3,7 @@
   "configurations": [
     {
       "name": "massy-web",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--prefix", "web"],
+      "url": "http://localhost:5173",
       "port": 5173
     }
   ]

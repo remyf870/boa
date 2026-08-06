@@ -293,7 +293,15 @@ export default async function budgetRoutes(app: FastifyInstance, opts: { db: Db;
   // ── Versions list + detail (line-by-line diff against active) ──────────────
   app.get('/api/budgets/versions', { preHandler: requireAuth() }, async (req, reply) => {
     const user = req.currentUser!;
-    const query = z.object({ costCentreId: z.string().uuid().optional() }).safeParse(req.query);
+    const query = z
+      .object({
+        costCentreId: z.string().uuid().optional(),
+        // Omitting costCentreId with status=pending_approval is how an
+        // org-wide budget approver finds everything waiting on them without
+        // hunting cost centre by cost centre.
+        status: z.enum(['draft', 'pending_approval', 'active', 'rejected', 'superseded']).optional(),
+      })
+      .safeParse(req.query);
     if (!query.success) return reply.code(400).send({ error: 'invalid_request' });
     if (query.data.costCentreId && !canSeeBudgets(user, query.data.costCentreId)) {
       return reply.code(404).send({ error: 'not_found' });
@@ -313,9 +321,10 @@ export default async function budgetRoutes(app: FastifyInstance, opts: { db: Db;
          LEFT JOIN users au ON au.id = bv.approved_by
          LEFT JOIN users ru ON ru.id = bv.rejected_by
          WHERE ($1::uuid IS NULL OR bv.cost_centre_id = $1)
+           AND ($2::budget_version_status IS NULL OR bv.status = $2)
          ORDER BY bv.created_at DESC
          LIMIT 200`,
-        [query.data.costCentreId ?? null],
+        [query.data.costCentreId ?? null, query.data.status ?? null],
       );
       return result.rows;
     });

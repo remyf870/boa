@@ -14,6 +14,26 @@ export default async function dashboardRoutes(app: FastifyInstance, opts: { db: 
     const user = req.currentUser!;
 
     return withUserContext(db, user.id, async (client) => {
+      // §5.9/§6.1 governance work waits in its own queues. Without these the
+      // only way a budget or DOA approver learns something needs them is to
+      // browse to the right page and pick the right cost centre.
+      const [pendingBudgets, pendingDoa] = await Promise.all([
+        client.query(
+          `SELECT count(*)::int AS n FROM budget_versions bv
+           WHERE bv.status = 'pending_approval'
+             AND bv.proposed_by <> $1
+             AND app_user_has_role('budget_approver')`,
+          [user.id],
+        ),
+        client.query(
+          `SELECT count(*)::int AS n FROM doa_matrix_versions dv
+           WHERE dv.status = 'draft'
+             AND dv.uploaded_by <> $1
+             AND app_user_has_role('doa_approver')`,
+          [user.id],
+        ),
+      ]);
+
       const [pendingApproval, myOpen, deniedThisMonth] = await Promise.all([
         client.query(
           `SELECT count(*)::int AS n
@@ -75,6 +95,8 @@ export default async function dashboardRoutes(app: FastifyInstance, opts: { db: 
         pendingMyApproval: pendingApproval.rows[0]!.n,
         myOpenRequisitions: myOpen.rows[0]!.n,
         deniedThisMonth: deniedThisMonth.rows[0]!.n,
+        pendingBudgetApprovals: pendingBudgets.rows[0]!.n,
+        pendingDoaActivations: pendingDoa.rows[0]!.n,
         budgetPositions: budgets,
       };
     });
