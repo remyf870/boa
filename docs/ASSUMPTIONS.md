@@ -191,6 +191,29 @@ Three of the fixes embed judgement calls worth recording:
   answered, the CHECK and the API accept only the quarterly form the resolver produces. Supporting
   annual budgets means changing `fiscal_period_of`, the CHECKs and the API patterns together.
 
+### 2.20 Workflow-consistency review (2026-08-06) — §6.1 reviewer visibility completed
+
+A second multi-agent review walked every user journey end-to-end and independently verified
+each finding against the code. The four confirmed DOA findings are fixed (each with a
+regression test):
+
+- §2.19's statement that routing-hole warnings are "shown to the second-person reviewer" was
+  aspirational — the warnings lived only in the uploader's browser session. They now persist on
+  the version itself (`0011_doa_reviewer_visibility.sql`, frozen once the version leaves draft),
+  and activation is a full review screen (complete rule set, line-by-line diff vs the active
+  version, and the recorded warnings) instead of a bare confirm dialog.
+- DOA governance now notifies: every `doa_approver` when a draft is uploaded, and the uploader
+  when their version is activated (`doa_submitted` / `doa_activated` — reference-only subjects
+  per A.5.14).
+- Server validation-issue lists (`issues[]` on 422s) now surface in the web client instead of a
+  bare error slug, so an activator refused by revalidation sees the concrete problems and the
+  remedy (corrected re-upload).
+
+The same review confirmed 33 further findings across the budget, requester, approver,
+accounting and navigation journeys (6 high severity). They are being fixed
+highest-severity first; each fix updates this file or the control matrix only where it
+changes a control's story.
+
 ---
 
 ## 3. Resolved assumptions

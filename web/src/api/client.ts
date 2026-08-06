@@ -15,11 +15,14 @@ const CSRF_HEADER = "x-csrf-token";
 
 export class ApiError extends Error {
   readonly status: number;
+  /** Per-item validation issues (e.g. DOA/budget upload or activation 422s). */
+  readonly issues: string[];
 
-  constructor(status: number, message?: string) {
+  constructor(status: number, message?: string, issues: string[] = []) {
     super(message ?? `Request failed with status ${status}`);
     this.name = "ApiError";
     this.status = status;
+    this.issues = issues;
   }
 }
 
@@ -93,13 +96,24 @@ export async function api<T>(path: string, options: ApiRequestOptions = {}): Pro
 
   if (!response.ok) {
     let message = `Request failed with status ${response.status}`;
+    let issues: string[] = [];
     try {
-      const data = (await response.json()) as { message?: string; error?: string };
+      const data = (await response.json()) as { message?: string; error?: string; issues?: unknown };
       message = data.message ?? data.error ?? message;
+      // Validation-style errors carry the actual problems in `issues`;
+      // swallowing them left users with a bare slug like "revalidation_failed"
+      // and no idea what to fix (workflow-consistency review finding).
+      if (Array.isArray(data.issues)) {
+        issues = data.issues.filter((i): i is string => typeof i === "string");
+        if (issues.length > 0) {
+          const shown = issues.slice(0, 5);
+          message = `${message}: ${shown.join("; ")}${issues.length > shown.length ? ` (+${issues.length - shown.length} more)` : ""}`;
+        }
+      }
     } catch {
       // Non-JSON error body — keep the generic message.
     }
-    throw new ApiError(response.status, message);
+    throw new ApiError(response.status, message, issues);
   }
 
   if (response.status === 204) {

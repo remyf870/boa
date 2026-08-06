@@ -18,6 +18,8 @@ export const NotificationTemplate = {
   BudgetSubmitted: 'budget_submitted',
   BudgetApproved: 'budget_approved',
   BudgetRejected: 'budget_rejected',
+  DoaSubmitted: 'doa_submitted',
+  DoaActivated: 'doa_activated',
   AttachmentQuarantined: 'attachment_quarantined',
 } as const;
 export type NotificationTemplateName = (typeof NotificationTemplate)[keyof typeof NotificationTemplate];
@@ -33,6 +35,8 @@ const SUBJECTS: Record<NotificationTemplateName, (ref: string) => string> = {
   budget_submitted: (ref) => `Budget proposal ${ref} awaits your approval`,
   budget_approved: (ref) => `Budget proposal ${ref} was approved and is now active`,
   budget_rejected: (ref) => `Budget proposal ${ref} was not approved — open the app for the reason`,
+  doa_submitted: (ref) => `DOA matrix ${ref} awaits your activation review`,
+  doa_activated: (ref) => `DOA matrix ${ref} is now active — requisitions route on it`,
   attachment_quarantined: (ref) => `An upload on ${ref} failed the malware scan and was quarantined`,
 };
 

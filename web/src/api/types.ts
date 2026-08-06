@@ -314,6 +314,47 @@ export interface DoaVersionRow {
   rule_count: number;
 }
 
+export interface DoaRuleRow {
+  id: string;
+  category_code: string;
+  cost_centre_code: string | null;
+  min_amount: string;
+  max_amount: string | null;
+  currency: string;
+  approval_sequence: { type: string; value: string; label?: string }[];
+  requires_quotes: number;
+  notes: string | null;
+}
+
+/** GET /api/doa/versions/:id — the §6.1 activation-review payload. */
+export interface DoaVersionDetail {
+  version: {
+    id: string;
+    version_no: number;
+    status: "draft" | "active" | "superseded";
+    uploaded_at: string;
+    approved_at: string | null;
+    uploaded_by_name: string;
+    approved_by_name: string | null;
+    validation_warnings: string[];
+  };
+  rules: DoaRuleRow[];
+}
+
+export interface DoaDiffEntry {
+  categoryCode: string;
+  costCentreCode: string | null;
+  band: string;
+  change: "added" | "removed" | "changed";
+  detail?: string;
+}
+
+/** GET /api/doa/versions/:id/diff — changes vs the active version. */
+export interface DoaDiffResponse {
+  activeVersionNo: number | null;
+  entries: DoaDiffEntry[];
+}
+
 export interface AppSettingRow {
   key: string;
   value: unknown;

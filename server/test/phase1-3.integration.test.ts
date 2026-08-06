@@ -889,8 +889,33 @@ describe.skipIf(!TEST_DATABASE_URL)('Phases 1-3 (§5.1-§5.9, §6.1-§6.3)', () 
       data: workbook,
     });
     expect(uploaded.statusCode).toBe(201);
-    const body = uploaded.json() as { versionId: string; diff: { entries: unknown[] } };
+    const body = uploaded.json() as {
+      versionId: string;
+      versionNo: number;
+      diff: { entries: unknown[] };
+      warnings: string[];
+    };
     expect(body.diff.entries.length).toBeGreaterThan(0);
+
+    // §6.1 second-person visibility: titleA holds approver only in T-LEA, so
+    // these org-wide rules carry routing-hole warnings — which must persist ON
+    // the version (not just in the uploader's browser) so the activator
+    // reviews the same list, and must come back on the review endpoint.
+    expect(body.warnings.length).toBeGreaterThan(0);
+    const detail = await get(doaAdmin, `/api/doa/versions/${body.versionId}`);
+    expect(detail.statusCode).toBe(200);
+    const detailBody = detail.json() as { version: { validation_warnings: string[] }; rules: unknown[] };
+    expect(detailBody.version.validation_warnings).toEqual(body.warnings);
+    expect(detailBody.rules.length).toBeGreaterThan(0);
+
+    // Every activator is told there is a draft waiting (a draft nobody knows
+    // about keeps requisitions routing on the stale matrix).
+    const submittedNotice = await db.query(
+      `SELECT 1 FROM notification_outbox
+       WHERE template = 'doa_submitted' AND recipient_user_id = $1 AND subject LIKE $2`,
+      [fx.fd, `%v${body.versionNo}%`],
+    );
+    expect(submittedNotice.rows.length).toBe(1);
 
     // Two-person rule, three layers deep: (1) activation needs doa_approver,
     // which the uploader's doa_admin role can never coexist with (SoD trigger),
@@ -918,6 +943,56 @@ describe.skipIf(!TEST_DATABASE_URL)('Phases 1-3 (§5.1-§5.9, §6.1-§6.3)', () 
       [body.versionId],
     );
     expect(audit.rows.length).toBe(1);
+
+    // The uploader is told their version went live (previously: silence).
+    const activatedNotice = await db.query(
+      `SELECT 1 FROM notification_outbox
+       WHERE template = 'doa_activated' AND recipient_user_id = $1 AND subject LIKE $2`,
+      [fx.doaAdmin, `%v${body.versionNo}%`],
+    );
+    expect(activatedNotice.rows.length).toBe(1);
+
+    // The warnings the activator judged are frozen with the version (0011)
+    await expect(
+      db.query(`UPDATE doa_matrix_versions SET validation_warnings = '["tampered"]'::jsonb WHERE id = $1`, [
+        body.versionId,
+      ]),
+    ).rejects.toThrow(/never edited|immutable/);
+  });
+
+  it('§6.1: activation revalidates against current state and returns the concrete issues, not a bare slug', async () => {
+    const doaAdmin = await loginAs(fx.doaAdmin);
+    const categories = await db.query<{ code: string }>('SELECT code FROM categories WHERE active ORDER BY code');
+    const rows = categories.rows.map((c) => [c.code, '', 0, '', 'TTD', fx.titleA, '', '', 0, 'drift probe'] as (string | number)[]);
+    const workbook = await xlsxBuffer(
+      ['Category', 'Cost Centre', 'Min Amount', 'Max Amount', 'Currency', 'Approver 1', 'Approver 2', 'Approver 3', 'Quotes Required', 'Notes'],
+      rows,
+    );
+    const uploaded = await upload(doaAdmin, '/api/doa/upload', {}, {
+      filename: 'doa-drift.xlsx',
+      contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      data: workbook,
+    });
+    expect(uploaded.statusCode).toBe(201);
+    const { versionId } = uploaded.json() as { versionId: string };
+
+    // Drift between upload and activation: a new active category the draft
+    // does not cover. Activation must refuse WITH the list of problems — the
+    // web client surfaces `issues`, so the approver knows the remedy is a
+    // corrected re-upload (previously they saw only "revalidation_failed").
+    const driftCode = `T-DRIFT-${RUN}`;
+    await db.query(`INSERT INTO categories (code, name) VALUES ($1, 'Drift probe cat')`, [driftCode]);
+    try {
+      const fd = await loginAs(fx.fd);
+      const refused = await post(fd, `/api/doa/versions/${versionId}/activate`);
+      expect(refused.statusCode).toBe(422);
+      const refusedBody = refused.json() as { error: string; issues: string[] };
+      expect(refusedBody.error).toBe('revalidation_failed');
+      expect(refusedBody.issues.join('\n')).toContain(driftCode);
+    } finally {
+      // Deactivate the drift category so later tests' coverage is unaffected
+      await db.query(`UPDATE categories SET active = false WHERE code = $1`, [driftCode]);
+    }
   });
 
   it('§5.4: cumulative invoice totals cannot slip past the tolerance one invoice at a time', async () => {

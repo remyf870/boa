@@ -11,6 +11,7 @@ import { withUserContext, type Db } from '../db/pool.js';
 import { AuditAction, writeAudit } from '../audit/audit.js';
 import { requireAuth, requireRoles } from '../plugins/rbac.js';
 import { DOA_TEMPLATE_COLUMNS, diffAgainstActive, parseDoaWorkbook, validateDoaRules } from '../doa/import.js';
+import { NotificationTemplate, queueNotification } from '../notify/notifier.js';
 import { readSetting } from '../settings.js';
 import { detectFileKind } from '../files/magic.js';
 import { scanBuffer } from '../files/scanner.js';
@@ -206,10 +207,14 @@ export default async function doaRoutes(app: FastifyInstance, opts: { db: Db; co
         const nextNo = await client.query<{ n: number }>(
           'SELECT coalesce(max(version_no), 0) + 1 AS n FROM doa_matrix_versions',
         );
+        // Warnings persist ON the version so the activator — a different
+        // person by rule — reviews the same routing holes the uploader was
+        // shown (§6.1; previously they lived only in the uploader's browser).
         const version = await client.query<{ id: string; version_no: number }>(
-          `INSERT INTO doa_matrix_versions (version_no, status, source_file_id, file_sha256, uploaded_by)
-           VALUES ($1, 'draft', $2, $3, $4) RETURNING id, version_no`,
-          [nextNo.rows[0]!.n, attachment.rows[0]!.id, sha, actor.id],
+          `INSERT INTO doa_matrix_versions (version_no, status, source_file_id, file_sha256, uploaded_by,
+                                            validation_warnings)
+           VALUES ($1, 'draft', $2, $3, $4, $5) RETURNING id, version_no`,
+          [nextNo.rows[0]!.n, attachment.rows[0]!.id, sha, actor.id, JSON.stringify(validation.warnings)],
         );
         for (const r of validation.rules) {
           await client.query(
@@ -229,6 +234,23 @@ export default async function doaRoutes(app: FastifyInstance, opts: { db: Db; co
             ],
           );
         }
+        // A draft nobody is told about keeps every new requisition routing on
+        // the stale matrix — tell every activator there is work waiting
+        // (mirrors budget submission; §5.2 outbox rules: reference only).
+        const activators = await client.query<{ user_id: string }>(
+          `SELECT DISTINCT ra.user_id FROM roles_assignments ra
+           JOIN users u ON u.id = ra.user_id AND u.status = 'active'
+           WHERE ra.role = 'doa_approver' AND ra.revoked_at IS NULL AND ra.user_id <> $1`,
+          [actor.id],
+        );
+        for (const a of activators.rows) {
+          await queueNotification(client, {
+            recipientUserId: a.user_id,
+            template: NotificationTemplate.DoaSubmitted,
+            reference: `v${version.rows[0]!.version_no}`,
+            deepLink: '/admin',
+          });
+        }
         await writeAudit(client, {
           actorUserId: actor.id,
           action: AuditAction.DoaVersionUploaded,
@@ -238,6 +260,7 @@ export default async function doaRoutes(app: FastifyInstance, opts: { db: Db; co
             versionNo: version.rows[0]!.version_no,
             fileSha256: sha,
             ruleCount: validation.rules.length,
+            notifiedActivators: activators.rows.length,
             diffSummary: {
               added: diff.entries.filter((e) => e.change === 'added').length,
               removed: diff.entries.filter((e) => e.change === 'removed').length,
@@ -417,6 +440,14 @@ export default async function doaRoutes(app: FastifyInstance, opts: { db: Db; co
            WHERE id = $1`,
           [version.id, actor.id],
         );
+        // Close the loop with the uploader — they cannot see activation
+        // happen and were previously never told their version went live.
+        await queueNotification(client, {
+          recipientUserId: version.uploaded_by,
+          template: NotificationTemplate.DoaActivated,
+          reference: `v${version.version_no}`,
+          deepLink: '/admin',
+        });
         await writeAudit(client, {
           actorUserId: actor.id,
           action: AuditAction.DoaVersionActivated,
