@@ -3,12 +3,15 @@
 > Source: the 2026-08-06 workflow-consistency review (multi-agent, every finding independently
 > verified against the code with file:line evidence — 37 leads judged: 31 confirmed, 6 partial,
 > 0 refuted). The high-severity findings and the cheap adjacent ones were fixed the same day
-> (commits `ddfd963`, `1cb704e` and the follow-up). Everything below is **confirmed real,
-> still open**, ordered by severity. Each entry carries the agreed fix sketch so no
-> re-investigation is needed.
+> (commits `ddfd963`, `1cb704e` and the follow-up). The 2026-08-09 change-wave review's
+> confirmed findings (12 confirmed + 5 verified leads) were all fixed in the wave commit;
+> its deliberately deferred remainders are the **G** entries below. Everything here is
+> **confirmed real, still open**, ordered by severity. Each entry carries the agreed fix
+> sketch so no re-investigation is needed.
 >
-> Rules that bind any fix: new versioned migrations only; audit append-only; configurable =
-> data in `app_settings`; a fix without a regression test is not done.
+> Rules that bind any fix: new versioned migrations only (0001–0014 are applied/committed);
+> audit append-only; configurable = data in `app_settings`; a fix without a regression test
+> is not done.
 
 ## Medium
 
@@ -67,6 +70,24 @@
   and the Admin page gates its sections, but typing `/accounting` as a requester still mounts
   the page and 403s (writing an `AccessDenied` audit row per click). *Fix:* small
   `RequireRole` route wrapper in `App.tsx` rendering an access note instead of mounting.
+- **G1 — Requisition-less attachment downloads are an app-level dead end.** The only download
+  route (`GET /api/attachments/:id/download`) gates on uploader/requester/cost-centre, so for
+  requisition-less files that reduces to the uploader alone: a `supplier_approver` cannot
+  fetch the bulk-upload workbook their decision is based on (0014 fixed the RLS half — the
+  read POLICY now admits them), and auditors/doa_admins hit the same wall on `doa_matrix` /
+  `budget_import` evidence (pre-existing). Not blocking: the workbook's whole content is
+  materialised into the pending supplier rows. *Fix:* make the route's app gate type-aware
+  for requisition-less files (supplier_import → supplier_approver; doa_matrix/budget_import →
+  their approver roles; auditor for all), expose `source_file_id` in `GET /api/suppliers`,
+  link it from the admin supplier list.
+- **G2 — Pre-provision residual: one human with two in-tenant Entra identities can defeat
+  any two-person control.** The wave added the `allowed_email_domains` allowlist and a
+  `pre_provisioned_role_claim` alert (critical when the claimed roles include
+  supplier/budget/doa approver, accounting or sysadmin), so it is detectable — not
+  preventable in code: identity dedup is an Entra-tenant property (`preferred_username` is
+  mutable and guests carry home emails). *Mitigations:* tenant hygiene, periodic review of
+  `claimedPreProvisioned` audit events against role grants, optionally an admin-UI
+  confirmation ("this email will bind whoever signs in with it") on the Add-user form.
 
 ## Low
 
@@ -101,3 +122,12 @@
 - **E8 — Requisition cancellation notifies nobody** (a pending approver's emailed work item
   silently vanishes; no control bypassed). *Fix:* notify pending-step assignees (and, for
   approved requisitions, decided approvers) in the cancel transaction.
+- **G3 — Suppliers remain outside RLS by design** (0006 reference-table posture). Their
+  write-protection under the production role is now CHECK constraints + the 0014 state
+  machine/no-delete triggers + app RBAC — adequate for rows that carry no financial detail,
+  but if the posture ever tightens, add supplier RLS policies in a future migration.
+- **G4 — Pending supplier requests are never re-notified.** All three request paths notify
+  supplier approvers once; `sla-reminders.ts` covers only requisition approval steps, so a
+  missed email leaves the request sitting until someone opens /admin (the pending-first
+  banner mitigates). *Fix:* a pending-supplier branch in `sla-reminders.ts` reusing the
+  existing threshold settings.

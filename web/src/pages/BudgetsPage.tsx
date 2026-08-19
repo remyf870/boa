@@ -28,7 +28,7 @@ function LivePosition({ costCentreId }: { costCentreId: string }) {
 
   return (
     <div className="mt-3 rounded-md border border-slate-200 bg-white">
-      <div className="flex items-center justify-between border-b border-slate-100 px-4 py-2">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-4 py-2">
         <p className="text-sm font-medium text-slate-900">
           Period {position.period}
           {position.budgetVersionId === null ? <span className="ml-2 text-amber-700">— no approved budget for this period yet</span> : null}
@@ -38,53 +38,56 @@ function LivePosition({ costCentreId }: { costCentreId: string }) {
           {live ? "live" : "reconnecting…"}
         </span>
       </div>
-      <table className="w-full text-left text-sm">
-        <thead className="border-b border-slate-200 bg-slate-50 text-xs text-slate-500">
-          <tr>
-            {["Category", "Budget", "Committed", "Actual", "Available"].map((h) => (
-              <th key={h} className="px-4 py-2 font-medium">
-                {h}
-              </th>
+      {/* Five money columns never fit a phone — the table scrolls, the page does not. */}
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[560px] text-left text-sm">
+          <thead className="border-b border-slate-200 bg-slate-50 text-xs text-slate-500">
+            <tr>
+              {["Category", "Budget", "Committed", "Actual", "Available"].map((h) => (
+                <th key={h} className="px-4 py-2 font-medium">
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {position.categories.map((c) => (
+              <tr key={c.categoryId} className="border-b border-slate-100">
+                <td className="px-4 py-2">
+                  {c.categoryCode} <span className="text-xs text-slate-400">{c.categoryName}</span>
+                </td>
+                <td className="px-4 py-2 tabular-nums">
+                  <Money amount={c.budget} />
+                </td>
+                <td className="px-4 py-2 tabular-nums">
+                  <Money amount={c.committed} />
+                </td>
+                <td className="px-4 py-2 tabular-nums">
+                  <Money amount={c.actual} />
+                </td>
+                <td className="px-4 py-2 font-medium tabular-nums">
+                  <Money amount={c.available} />
+                </td>
+              </tr>
             ))}
-          </tr>
-        </thead>
-        <tbody>
-          {position.categories.map((c) => (
-            <tr key={c.categoryId} className="border-b border-slate-100">
-              <td className="px-4 py-2">
-                {c.categoryCode} <span className="text-xs text-slate-400">{c.categoryName}</span>
+            <tr className="bg-slate-50 font-semibold">
+              <td className="px-4 py-2">Total</td>
+              <td className="px-4 py-2 tabular-nums">
+                <Money amount={position.totals.budget} />
               </td>
               <td className="px-4 py-2 tabular-nums">
-                <Money amount={c.budget} />
+                <Money amount={position.totals.committed} />
               </td>
               <td className="px-4 py-2 tabular-nums">
-                <Money amount={c.committed} />
+                <Money amount={position.totals.actual} />
               </td>
               <td className="px-4 py-2 tabular-nums">
-                <Money amount={c.actual} />
-              </td>
-              <td className="px-4 py-2 font-medium tabular-nums">
-                <Money amount={c.available} />
+                <Money amount={position.totals.available} />
               </td>
             </tr>
-          ))}
-          <tr className="bg-slate-50 font-semibold">
-            <td className="px-4 py-2">Total</td>
-            <td className="px-4 py-2 tabular-nums">
-              <Money amount={position.totals.budget} />
-            </td>
-            <td className="px-4 py-2 tabular-nums">
-              <Money amount={position.totals.committed} />
-            </td>
-            <td className="px-4 py-2 tabular-nums">
-              <Money amount={position.totals.actual} />
-            </td>
-            <td className="px-4 py-2 tabular-nums">
-              <Money amount={position.totals.available} />
-            </td>
-          </tr>
-        </tbody>
-      </table>
+          </tbody>
+        </table>
+      </div>
       <p className="border-t border-slate-100 px-4 py-2 text-[11px] text-slate-400">
         Available = Budget − Committed − Actual. Committed the moment a purchase is finally approved; moved to Actual when its invoice posts.
       </p>
@@ -183,7 +186,7 @@ function ProposeModal({
           <textarea className={inputClass} rows={2} value={reason} onChange={(e) => setReason(e.target.value)} />
         </Field>
       </div>
-      <div className="mt-3 grid grid-cols-2 gap-2">
+      <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
         {reference.categories.map((c) => (
           <Field
             key={c.id}
@@ -211,7 +214,7 @@ function ProposeModal({
           committed or actual spend remains. Click the same button again to proceed, or fill the amount{confirmDrop.length > 1 ? "s" : ""} in.
         </p>
       ) : null}
-      <div className="mt-3 flex items-center gap-3">
+      <div className="mt-3 flex flex-wrap items-center gap-3">
         <a className="text-sm text-slate-700 underline underline-offset-2" href={`/api/budgets/template.xlsx?costCentreId=${costCentreId}&period=${period}`}>
           Download Excel template
         </a>
@@ -281,7 +284,7 @@ function VersionDetailModal({ versionId, onClose }: { versionId: string; onClose
 
   return (
     <Modal title={`${v.cost_centre_code} ${v.period} — v${v.version_no}`} onClose={() => onClose(false)}>
-      <div className="flex items-center gap-2 text-sm">
+      <div className="flex flex-wrap items-center gap-2 text-sm">
         <StatusBadge status={v.status} />
         <span className="text-slate-500">
           proposed by {v.proposed_by_name} · {formatDate(v.created_at)}
@@ -291,26 +294,28 @@ function VersionDetailModal({ versionId, onClose }: { versionId: string; onClose
       {v.rejection_reason ? <p className="mt-1 text-sm text-red-700">Rejected: {v.rejection_reason}</p> : null}
 
       <h3 className="mt-4 text-sm font-semibold text-slate-900">Line-by-line change vs the active budget</h3>
-      <table className="mt-2 w-full text-left text-sm">
-        <thead className="border-b border-slate-200 bg-slate-50 text-xs text-slate-500">
-          <tr>
-            <th className="px-3 py-1.5 font-medium">Category</th>
-            <th className="px-3 py-1.5 font-medium">Current</th>
-            <th className="px-3 py-1.5 font-medium">Proposed</th>
-            <th className="px-3 py-1.5 font-medium">Change</th>
-          </tr>
-        </thead>
-        <tbody>
-          {detail.data.diff.map((d) => (
-            <tr key={d.categoryCode} className="border-b border-slate-100">
-              <td className="px-3 py-1.5">{d.categoryCode}</td>
-              <td className="px-3 py-1.5 tabular-nums">{d.before === null ? "—" : <Money amount={d.before} />}</td>
-              <td className="px-3 py-1.5 tabular-nums">{d.after === null ? "—" : <Money amount={d.after} />}</td>
-              <td className="px-3 py-1.5 text-xs">{d.change}</td>
+      <div className="mt-2 overflow-x-auto">
+        <table className="w-full min-w-[480px] text-left text-sm">
+          <thead className="border-b border-slate-200 bg-slate-50 text-xs text-slate-500">
+            <tr>
+              <th className="px-3 py-1.5 font-medium">Category</th>
+              <th className="px-3 py-1.5 font-medium">Current</th>
+              <th className="px-3 py-1.5 font-medium">Proposed</th>
+              <th className="px-3 py-1.5 font-medium">Change</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {detail.data.diff.map((d) => (
+              <tr key={d.categoryCode} className="border-b border-slate-100">
+                <td className="px-3 py-1.5">{d.categoryCode}</td>
+                <td className="px-3 py-1.5 tabular-nums">{d.before === null ? "—" : <Money amount={d.before} />}</td>
+                <td className="px-3 py-1.5 tabular-nums">{d.after === null ? "—" : <Money amount={d.after} />}</td>
+                <td className="px-3 py-1.5 text-xs">{d.change}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
 
       {/* Every state says what it is waiting for and who owns the next move,
           so nobody opens a version and finds an unexplained dead-end. */}
@@ -410,11 +415,11 @@ export function BudgetsPage() {
         <div>
           <h1 className="text-lg font-semibold text-slate-900">Budgets</h1>
           <p className="mt-1 text-sm text-slate-500">
-            Live position per cost centre. Budgets change only through approved versions (§5.9) — never by direct edit.
+            Live position per department. Budgets change only through approved versions (§5.9) — never by direct edit.
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <select className={inputClass} value={selected} onChange={(e) => setCostCentreId(e.target.value)} aria-label="Cost centre">
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+          <select className={inputClass} value={selected} onChange={(e) => setCostCentreId(e.target.value)} aria-label="Department">
             {visibleCostCentres.map((cc) => (
               <option key={cc.id} value={cc.id}>
                 {cc.code} — {cc.name}
@@ -479,12 +484,12 @@ export function BudgetsPage() {
       {selected ? (
         <LivePosition key={selected} costCentreId={selected} />
       ) : (
-        <EmptyState message="Your roles have no budget visibility for any cost centre." />
+        <EmptyState message="Your roles have no budget visibility for any department." />
       )}
 
       <h2 className="mt-6 text-base font-semibold text-slate-900">Versions</h2>
       <ErrorNote message={versions.error} />
-      {versions.data && versions.data.versions.length === 0 ? <EmptyState message="No budget versions for this cost centre yet." /> : null}
+      {versions.data && versions.data.versions.length === 0 ? <EmptyState message="No budget versions for this department yet." /> : null}
       {versions.data && versions.data.versions.length > 0 ? (
         <div className="mt-2 overflow-x-auto rounded-md border border-slate-200 bg-white">
           <table className="w-full min-w-[760px] text-left text-sm">

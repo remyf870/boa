@@ -40,15 +40,24 @@ export default async function dashboardRoutes(app: FastifyInstance, opts: { db: 
            FROM approval_steps st
            JOIN requisitions r ON r.id = st.requisition_id
            WHERE st.decision = 'pending'
-             AND app_user_has_role('approver', r.cost_centre_id)
              AND (st.assigned_user_id = $1
                   OR app_user_is_delegate_for(st.assigned_user_id, r.cost_centre_id))
              AND ((st.purpose = 'doa' AND r.status = 'submitted'
+                   AND app_user_has_role('approver', r.cost_centre_id)
                    AND NOT EXISTS (SELECT 1 FROM approval_steps prev
                                    WHERE prev.requisition_id = st.requisition_id
                                      AND prev.purpose = 'doa' AND prev.step_no < st.step_no
                                      AND prev.decision <> 'approved'))
+                  -- The Accounts final-review step (0014) counts for the
+                  -- org-wide accounting role, mirroring the approvals queue.
+                  OR (st.purpose = 'finance_review' AND r.status = 'submitted'
+                      AND app_user_has_role('accounting')
+                      AND NOT EXISTS (SELECT 1 FROM approval_steps prev
+                                      WHERE prev.requisition_id = st.requisition_id
+                                        AND prev.purpose = 'doa'
+                                        AND prev.decision <> 'approved'))
                   OR (st.purpose = 'variance_reapproval' AND r.status IN ('approved','closed')
+                      AND app_user_has_role('approver', r.cost_centre_id)
                       AND EXISTS (SELECT 1 FROM invoices i
                                   WHERE i.reapproval_step_id = st.id
                                     AND i.status = 'pending_reapproval')))`,

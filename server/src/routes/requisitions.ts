@@ -32,6 +32,34 @@ function referencePrefix(costCentreCode: string): string {
   return costCentreCode.split('-')[0]!.toUpperCase();
 }
 
+export const FINANCE_REVIEW_ROLE_LABEL = 'Accounts — final review';
+
+/** The accounting reviewer for the mandatory finance_review step (client
+ * change list: "the head of accounts... has to be the final hurdle for
+ * approvals"). Earliest active org-wide accounting grant, deterministic like
+ * the DOA engine's candidate ordering. Excluded: the requester (A.5.3 — the
+ * SoD trigger already forbids accounting + requester, this is defence in
+ * depth) and the active DOA version's uploader/activator — decide() 403s
+ * them on doa_version_conflict, so assigning them would mint a step its
+ * assignee is forbidden to decide (adversarial-review finding). */
+async function pickAccountingReviewer(
+  client: { query: (q: string, v?: unknown[]) => Promise<{ rows: { id: string; display_name: string }[] }> },
+  excludeIds: (string | null | undefined)[],
+): Promise<{ id: string; display_name: string } | null> {
+  const { rows } = await client.query(
+    `SELECT u.id, u.display_name
+     FROM users u
+     JOIN roles_assignments ra ON ra.user_id = u.id
+       AND ra.role = 'accounting' AND ra.revoked_at IS NULL
+     WHERE u.status = 'active' AND u.id <> ALL($1::uuid[])
+     GROUP BY u.id, u.display_name
+     ORDER BY min(ra.granted_at), u.id
+     LIMIT 1`,
+    [excludeIds.filter((id): id is string => Boolean(id))],
+  );
+  return rows[0] ?? null;
+}
+
 export default async function requisitionRoutes(app: FastifyInstance, opts: { db: Db; config: Config }) {
   const { db } = opts;
 
@@ -49,12 +77,46 @@ export default async function requisitionRoutes(app: FastifyInstance, opts: { db
     if (!query.success) return reply.code(400).send({ error: 'invalid_request' });
 
     const rows = await withUserContext(db, user.id, async (client) => {
+      // Quotation/invoice documents ride on every list row (client change
+      // list, "Requester Role UI"): the list page shows upload state and
+      // offers direct downloads without opening the detail page.
       const result = await client.query(
         `SELECT r.id, r.reference, r.status, r.amount, r.currency, r.description,
                 r.classification, r.created_at, r.submitted_at, r.approved_at,
                 r.approval_reference, r.needed_by,
-                cc.code AS cost_centre_code, cat.code AS category_code,
-                u.display_name AS requester_name, s.name AS supplier_name
+                cc.code AS cost_centre_code, cc.department AS department,
+                cat.code AS category_code,
+                u.display_name AS requester_name, s.name AS supplier_name,
+                -- Drafts have no frozen snapshot yet, so fall back to the LIVE
+                -- active rule (same band match as resolveRule) — without it
+                -- every draft claimed a quotation was pending even in
+                -- zero-quote bands (review finding).
+                coalesce(
+                  (r.doa_rule_snapshot #>> '{rule,requiresQuotes}')::int,
+                  (SELECT dr.requires_quotes
+                   FROM doa_rules dr
+                   JOIN doa_matrix_versions dv ON dv.id = dr.version_id AND dv.status = 'active'
+                   WHERE dr.category_id = r.category_id
+                     AND (dr.cost_centre_id = r.cost_centre_id OR dr.cost_centre_id IS NULL)
+                     AND dr.currency = r.currency
+                     AND dr.min_amount <= r.amount
+                     AND (dr.max_amount IS NULL OR dr.max_amount > r.amount)
+                   ORDER BY dr.cost_centre_id NULLS LAST
+                   LIMIT 1)) AS requires_quotes,
+                coalesce((SELECT json_agg(json_build_object(
+                            'id', a.id, 'filename', a.filename, 'scan_status', a.scan_status)
+                            ORDER BY a.uploaded_at)
+                          FROM attachments a
+                          WHERE a.requisition_id = r.id AND a.type = 'quote'), '[]') AS quote_files,
+                coalesce((SELECT json_agg(json_build_object(
+                            'id', a.id, 'filename', a.filename, 'scan_status', a.scan_status)
+                            ORDER BY a.uploaded_at)
+                          FROM attachments a
+                          WHERE a.requisition_id = r.id AND a.type = 'invoice'), '[]') AS invoice_files,
+                (SELECT count(*) FROM invoices i
+                 WHERE i.requisition_id = r.id AND i.status <> 'rejected')::int AS live_invoice_count,
+                (SELECT count(*) FROM invoices i
+                 WHERE i.requisition_id = r.id AND i.status = 'posted')::int AS posted_invoice_count
          FROM requisitions r
          JOIN cost_centres cc ON cc.id = r.cost_centre_id
          JOIN categories cat ON cat.id = r.category_id
@@ -181,13 +243,29 @@ export default async function requisitionRoutes(app: FastifyInstance, opts: { db
       try {
         const rule = await resolveRule(client, { ...body.data });
         const chain = await resolveChain(client, rule, body.data.costCentreId, user.id);
+        const financeFinal = await readSetting(db, 'accounting_final_approval');
+        const financeReviewer = financeFinal
+          ? await pickAccountingReviewer(client, [user.id, rule.uploadedBy, rule.approvedBy])
+          : null;
         return {
-          route: chain.steps.map((s) => ({
-            stepNo: s.stepNo,
-            label: s.descriptor.label ?? s.descriptor.value,
-            approverName: s.displayName,
-            approverJobTitle: s.jobTitle,
-          })),
+          route: [
+            ...chain.steps.map((s) => ({
+              stepNo: s.stepNo,
+              label: s.descriptor.label ?? s.descriptor.value,
+              approverName: s.displayName,
+              approverJobTitle: s.jobTitle,
+            })),
+            ...(financeFinal
+              ? [
+                  {
+                    stepNo: chain.steps.length + 1,
+                    label: FINANCE_REVIEW_ROLE_LABEL,
+                    approverName: financeReviewer?.display_name ?? '(no accounting user available)',
+                    approverJobTitle: null,
+                  },
+                ]
+              : []),
+          ],
           flags: chain.flags.map((f) => f.type),
           requiresQuotes: rule.requiresQuotes,
           budget: {
@@ -242,6 +320,16 @@ export default async function requisitionRoutes(app: FastifyInstance, opts: { db
         body.data.categoryId,
       ]);
       if (!cat.rows[0]?.active) return { error: 'category_not_found' as const };
+      // Two-person supplier control (§2.21): only suppliers the
+      // supplier_approver has vetted may be referenced. Submit re-checks —
+      // this early check is friendly feedback, not the authoritative gate.
+      if (body.data.supplierId) {
+        const sup = await client.query<{ status: string }>('SELECT status FROM suppliers WHERE id = $1', [
+          body.data.supplierId,
+        ]);
+        if (!sup.rows[0]) return { error: 'supplier_not_found' as const };
+        if (sup.rows[0].status !== 'active') return { error: 'supplier_not_active' as const };
+      }
 
       const ref = await client.query<{ r: string }>('SELECT next_reference($1, $2) AS r', [
         referencePrefix(cc.rows[0].code),
@@ -307,6 +395,14 @@ export default async function requisitionRoutes(app: FastifyInstance, opts: { db
       if (row.status !== 'draft') return { code: 409 as const, error: 'only_drafts_are_editable' };
 
       const d = body.data;
+      // Same supplier vetting check as draft create (§2.21).
+      if (d.supplierId) {
+        const sup = await client.query<{ status: string }>('SELECT status FROM suppliers WHERE id = $1', [
+          d.supplierId,
+        ]);
+        if (!sup.rows[0]) return { code: 400 as const, error: 'supplier_not_found' as const };
+        if (sup.rows[0].status !== 'active') return { code: 400 as const, error: 'supplier_not_active' as const };
+      }
       const updated = await client.query(
         `UPDATE requisitions SET
            cost_centre_id = coalesce($2, cost_centre_id),
@@ -360,6 +456,7 @@ export default async function requisitionRoutes(app: FastifyInstance, opts: { db
         requester_id: string;
         cost_centre_id: string;
         category_id: string;
+        supplier_id: string | null;
         amount: string;
         currency: string;
         status: string;
@@ -367,6 +464,24 @@ export default async function requisitionRoutes(app: FastifyInstance, opts: { db
       const row = existing.rows[0];
       if (!row || row.requester_id !== user.id) return { code: 404 as const, error: 'not_found' };
       if (row.status !== 'draft') return { code: 409 as const, error: 'only_drafts_can_be_submitted' };
+
+      // Two-person supplier control (§2.21) — the authoritative gate: a
+      // draft's supplier may have been rejected or deactivated since it was
+      // attached, so submit re-checks. The 0014 state machine enforces the
+      // same rule at the DB layer.
+      if (row.supplier_id) {
+        const sup = await client.query<{ status: string }>('SELECT status FROM suppliers WHERE id = $1', [
+          row.supplier_id,
+        ]);
+        if (sup.rows[0]?.status !== 'active') {
+          return {
+            code: 422 as const,
+            error: 'supplier_not_active',
+            message:
+              'The selected supplier has not been approved (or is no longer active) — choose an approved supplier or remove it before submitting',
+          };
+        }
+      }
 
       let rule, chain;
       try {
@@ -400,6 +515,24 @@ export default async function requisitionRoutes(app: FastifyInstance, opts: { db
         }
       }
 
+      // Accounts final hurdle (client change list): every chain ends with a
+      // finance_review step decided by the org-wide accounting role. Failing
+      // loudly beats stranding the requisition with an unroutable chain
+      // (same philosophy as the B4 budget-submit fix).
+      const financeFinal = await readSetting(db, 'accounting_final_approval');
+      let financeReviewer: { id: string; display_name: string } | null = null;
+      if (financeFinal) {
+        financeReviewer = await pickAccountingReviewer(client, [user.id, rule.uploadedBy, rule.approvedBy]);
+        if (!financeReviewer) {
+          return {
+            code: 422 as const,
+            error: 'no_accounting_reviewer_available',
+            message:
+              'No active accounting user is available for the mandatory final review — ask the administrator to grant the accounting role',
+          };
+        }
+      }
+
       const snapshot = buildSnapshot(rule, chain);
       await client.query(
         `UPDATE requisitions
@@ -413,6 +546,13 @@ export default async function requisitionRoutes(app: FastifyInstance, opts: { db
           `INSERT INTO approval_steps (requisition_id, step_no, assigned_role, assigned_user_id)
            VALUES ($1, $2, $3, $4)`,
           [row.id, step.stepNo, step.descriptor.label ?? step.descriptor.value, step.userId],
+        );
+      }
+      if (financeReviewer) {
+        await client.query(
+          `INSERT INTO approval_steps (requisition_id, step_no, assigned_role, assigned_user_id, purpose)
+           VALUES ($1, $2, $3, $4, 'finance_review')`,
+          [row.id, chain.steps.length + 1, FINANCE_REVIEW_ROLE_LABEL, financeReviewer.id],
         );
       }
       await queueNotification(client, {
@@ -430,6 +570,9 @@ export default async function requisitionRoutes(app: FastifyInstance, opts: { db
           reference: row.reference,
           doaVersionNo: rule.versionNo,
           steps: chain.steps.map((s) => ({ stepNo: s.stepNo, userId: s.userId })),
+          financeReviewStep: financeReviewer
+            ? { stepNo: chain.steps.length + 1, userId: financeReviewer.id }
+            : null,
           flags: chain.flags,
         },
         ipAddress: req.ip,
@@ -437,7 +580,12 @@ export default async function requisitionRoutes(app: FastifyInstance, opts: { db
       });
       return {
         code: 200 as const,
-        route: chain.steps.map((s) => ({ stepNo: s.stepNo, approverName: s.displayName })),
+        route: [
+          ...chain.steps.map((s) => ({ stepNo: s.stepNo, approverName: s.displayName })),
+          ...(financeReviewer
+            ? [{ stepNo: chain.steps.length + 1, approverName: `${financeReviewer.display_name} (Accounts)` }]
+            : []),
+        ],
         flags: chain.flags,
       };
     });
@@ -562,7 +710,8 @@ export default async function requisitionRoutes(app: FastifyInstance, opts: { db
         const steps = await client.query<{ step_no: number; assigned_role: string | null; decided_at: Date | null; display_name: string | null; job_title: string | null }>(
           `SELECT st.step_no, st.assigned_role, st.decided_at, u.display_name, u.job_title
            FROM approval_steps st LEFT JOIN users u ON u.id = st.assigned_user_id
-           WHERE st.requisition_id = $1 AND st.decision = 'approved' AND st.purpose = 'doa'
+           WHERE st.requisition_id = $1 AND st.decision = 'approved'
+             AND st.purpose IN ('doa', 'finance_review')
            ORDER BY st.step_no`,
           [row.id],
         );

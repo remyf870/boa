@@ -16,6 +16,7 @@ export type Role =
   | 'budget_approver'
   | 'doa_admin'
   | 'doa_approver'
+  | 'supplier_approver'
   | 'auditor'
   | 'sysadmin';
 

@@ -16,6 +16,8 @@ const SETTING_SCHEMAS = {
     .min(1024)
     .max(100 * 1024 * 1024),
   budget_required_approvals: z.number().int().min(1).max(5),
+  accounting_final_approval: z.boolean(),
+  allowed_email_domains: z.array(z.string().min(1).max(253)).max(50),
 } as const;
 
 export type SettingKey = keyof typeof SETTING_SCHEMAS;
@@ -26,8 +28,9 @@ export const SETTING_KEYS = Object.keys(SETTING_SCHEMAS) as SettingKey[];
 type Queryable = Pick<pg.Pool, 'query'> | Pick<pg.PoolClient, 'query'>;
 
 /** Read every setting, validated. A missing or malformed row is a hard error —
- * the 0008 migration seeds all keys, so absence means tampering or a bad
- * deploy, and guessing a default silently would defeat plan §0.3. */
+ * migrations seed every key (0008, 0014), so absence means the database is
+ * behind the code (the startup guard in index.ts refuses that in production)
+ * or tampered with, and guessing a default silently would defeat plan §0.3. */
 export async function readSettings(db: Queryable): Promise<Settings> {
   const { rows } = await db.query<{ key: string; value: unknown }>('SELECT key, value FROM app_settings');
   const byKey = new Map(rows.map((r) => [r.key, r.value]));

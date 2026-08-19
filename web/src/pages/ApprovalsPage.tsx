@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api/client";
+import { hasRole } from "../api/types";
 import type { DelegationRow, QueueItem, ReferenceData, StepDetail } from "../api/types";
 import { useAuth } from "../components/AuthProvider";
 import { useApiQuery } from "../hooks/useApi";
@@ -91,7 +92,7 @@ function DecideModal({ stepId, onClose }: { stepId: string; onClose: (decided: b
             </Field>
           </div>
           <ErrorNote message={error} />
-          <div className="mt-4 flex justify-end gap-2">
+          <div className="mt-4 flex flex-wrap justify-end gap-2">
             <Button onClick={() => onClose(false)}>Close</Button>
             <Button kind="danger" disabled={busy} onClick={() => void decide("deny")}>
               Deny
@@ -149,7 +150,7 @@ function DelegationsSection() {
         <Field label="Delegate email">
           <input className={inputClass} value={form.delegateEmail} onChange={(e) => setForm((f) => ({ ...f, delegateEmail: e.target.value }))} />
         </Field>
-        <Field label="Cost centre" hint="Blank = all yours">
+        <Field label="Department" hint="Blank = all yours">
           <select className={inputClass} value={form.costCentreId} onChange={(e) => setForm((f) => ({ ...f, costCentreId: e.target.value }))}>
             <option value="">All</option>
             {reference.data?.costCentres.map((cc) => (
@@ -179,10 +180,10 @@ function DelegationsSection() {
         <ul className="mt-3 space-y-2">
           {delegations.data.delegations.map((d) => (
             <li key={d.id} className="flex flex-wrap items-center justify-between gap-2 rounded border border-slate-200 bg-white px-3 py-2 text-sm">
-              <span>
+              <span className="min-w-0 break-words">
                 <span className="font-medium">{d.delegator_name}</span> → <span className="font-medium">{d.delegate_name}</span>
                 <span className="ml-2 text-xs text-slate-500">
-                  {d.cost_centre_code ?? "all cost centres"} · {formatDate(d.starts_at)} – {formatDate(d.ends_at)} · {d.reason}
+                  {d.cost_centre_code ?? "all departments"} · {formatDate(d.starts_at)} – {formatDate(d.ends_at)} · {d.reason}
                 </span>
               </span>
               {d.revoked_at ? (
@@ -201,6 +202,8 @@ function DelegationsSection() {
 }
 
 export function ApprovalsPage() {
+  const { state } = useAuth();
+  const me = state.status === "authenticated" ? state.user : null;
   const queue = useApiQuery<{ queue: QueueItem[] }>("/api/approvals/queue");
   const [deciding, setDeciding] = useState<string | null>(null);
 
@@ -215,7 +218,7 @@ export function ApprovalsPage() {
           <table className="w-full min-w-[860px] text-left text-sm">
             <thead className="border-b border-slate-200 bg-slate-50 text-xs text-slate-500">
               <tr>
-                {["Reference", "Requester", "Cost centre", "Category", "Amount", "Submitted", "Kind", ""].map((h) => (
+                {["Reference", "Requester", "Department", "Category", "Amount", "Submitted", "Kind", ""].map((h) => (
                   <th key={h} className="px-3 py-2 font-medium">
                     {h}
                   </th>
@@ -232,14 +235,20 @@ export function ApprovalsPage() {
                     {q.via_delegation ? <span className="ml-2 rounded bg-sky-50 px-1.5 py-0.5 text-[11px] text-sky-700">as delegate</span> : null}
                   </td>
                   <td className="px-3 py-2">{q.requester_name}</td>
-                  <td className="px-3 py-2">{q.cost_centre_code}</td>
+                  <td className="px-3 py-2">{q.department ?? q.cost_centre_code}</td>
                   <td className="px-3 py-2">{q.category_code}</td>
                   <td className="px-3 py-2 tabular-nums">
                     <Money amount={q.purpose === "variance_reapproval" && q.invoice_amount ? q.invoice_amount : q.amount} currency={q.currency} />
                   </td>
                   <td className="px-3 py-2 text-slate-500">{formatDate(q.submitted_at)}</td>
                   <td className="px-3 py-2">
-                    {q.purpose === "variance_reapproval" ? <StatusBadge status="pending_reapproval" /> : <span className="text-xs text-slate-500">step {q.step_no}</span>}
+                    {q.purpose === "variance_reapproval" ? (
+                      <StatusBadge status="pending_reapproval" />
+                    ) : q.purpose === "finance_review" ? (
+                      <span className="text-xs font-medium text-slate-700">Accounts final review</span>
+                    ) : (
+                      <span className="text-xs text-slate-500">step {q.step_no}</span>
+                    )}
                   </td>
                   <td className="px-3 py-2 text-right">
                     <Button kind="primary" onClick={() => setDeciding(q.step_id)}>
@@ -263,7 +272,13 @@ export function ApprovalsPage() {
         />
       ) : null}
 
-      <DelegationsSection />
+      {/* Delegation is an APPROVER affordance: the server requires the
+          delegator (and the delegate) to hold 'approver', which accounting
+          can never hold (SoD) — accounting reaches this page for the
+          finance_review queue, where any accounting holder may decide, so
+          showing them a form that always 403s is a dead end (review
+          finding). */}
+      {hasRole(me, "approver") ? <DelegationsSection /> : null}
     </div>
   );
 }

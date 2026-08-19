@@ -107,10 +107,19 @@ export default async function accountingRoutes(app: FastifyInstance, opts: { db:
         );
         let closed = false;
         if (invoice.req_status === 'approved' && Number(posted.rows[0]!.total) >= Number(invoice.req_amount)) {
-          await client.query(
+          const closure = await client.query(
             `UPDATE requisitions SET status = 'closed', closed_at = now(), updated_at = now() WHERE id = $1`,
             [invoice.requisition_id],
           );
+          // A zero-row UPDATE means RLS filtered the row; committing would
+          // record requisitionClosed: true for a row still 'approved'
+          // (adversarial-review finding — the 0014 policy adds the
+          // accounting arm this write relies on). Roll the posting back.
+          if (closure.rowCount !== 1) {
+            throw new Error(
+              `requisition ${invoice.requisition_id} close updated ${closure.rowCount ?? 0} rows — RLS misconfiguration`,
+            );
+          }
           closed = true;
         }
         await writeAudit(client, {

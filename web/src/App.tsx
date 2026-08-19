@@ -18,7 +18,7 @@ function AuthGate() {
   if (state.status === "loading") {
     return (
       <main
-        className="flex min-h-screen items-center justify-center bg-slate-50"
+        className="flex min-h-dvh items-center justify-center bg-slate-50"
         aria-busy="true"
       >
         <p role="status" className="text-sm text-slate-500">
@@ -30,7 +30,7 @@ function AuthGate() {
 
   if (state.status === "error") {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-slate-50 p-6">
+      <main className="flex min-h-dvh items-center justify-center bg-slate-50 p-6">
         <div className="w-full max-w-sm rounded-lg border border-slate-200 bg-white p-8 text-center shadow-sm">
           <h1 className="text-base font-semibold text-slate-900">Unable to reach the server</h1>
           <p className="mt-2 text-sm text-slate-500">{state.message}</p>

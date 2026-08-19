@@ -24,6 +24,10 @@ export const NotificationTemplate = {
   InvoiceReapprovalApproved: 'invoice_reapproval_approved',
   InvoiceReapprovalRejected: 'invoice_reapproval_rejected',
   AttachmentQuarantined: 'attachment_quarantined',
+  SupplierApprovalRequested: 'supplier_approval_requested',
+  SupplierBulkApprovalRequested: 'supplier_bulk_approval_requested',
+  SupplierApproved: 'supplier_approved',
+  SupplierRejected: 'supplier_rejected',
 } as const;
 export type NotificationTemplateName = (typeof NotificationTemplate)[keyof typeof NotificationTemplate];
 
@@ -44,6 +48,15 @@ const SUBJECTS: Record<NotificationTemplateName, (ref: string) => string> = {
   invoice_reapproval_approved: (ref) => `The invoice variance on ${ref} was approved — the invoice can be posted`,
   invoice_reapproval_rejected: (ref) => `The invoice variance on ${ref} was declined — the invoice will not be posted`,
   attachment_quarantined: (ref) => `An upload on ${ref} failed the malware scan and was quarantined`,
+  // Supplier subjects carry an opaque request reference, never the supplier's
+  // name (A.5.14 — same rule as amounts).
+  supplier_approval_requested: (ref) => `Supplier request ${ref} awaits your approval`,
+  // Bulk uploads digest to ONE message whose reference is a count ("12
+  // supplier requests"), so a 40-row workbook does not read as a single
+  // request (review finding) — and per A.5.14 a count is as safe as a ref.
+  supplier_bulk_approval_requested: (ref) => `${ref} await your approval`,
+  supplier_approved: (ref) => `Supplier request ${ref} was approved — the supplier is now available`,
+  supplier_rejected: (ref) => `Supplier request ${ref} was not approved — open the app for the reason`,
 };
 
 export interface NotificationRequest {

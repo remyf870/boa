@@ -71,13 +71,16 @@ function cellNumber(row: ExcelJS.Row, col: number): number | null {
   return Number.isFinite(n) ? n : NaN;
 }
 
-/** "Finance Manager" → job_title; "user:a@b.c" → user; "role:approver" → role. */
+/** "Finance Manager" → job_title; "user:a@b.c" → user; "role:approver" → role;
+ * "tier:5" → tier (approvers granted DOA Tier 5). */
 function parseApprover(raw: string): ApproverDescriptor | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
-  const m = /^(job_title|user|role)\s*:\s*(.+)$/i.exec(trimmed);
+  const m = /^(job_title|user|role|tier)\s*:\s*(.+)$/i.exec(trimmed);
   if (m) {
-    return { type: m[1]!.toLowerCase() as ApproverDescriptor['type'], value: m[2]!.trim(), label: m[2]!.trim() };
+    const type = m[1]!.toLowerCase() as ApproverDescriptor['type'];
+    const value = m[2]!.trim();
+    return { type, value, label: type === 'tier' ? `Tier ${value}` : value };
   }
   if (trimmed.includes('@')) return { type: 'user', value: trimmed, label: trimmed };
   return { type: 'job_title', value: trimmed, label: trimmed };
@@ -127,6 +130,11 @@ export async function parseDoaWorkbook(buffer: Buffer): Promise<{ errors: string
     }
     if (!/^[A-Z]{3}$/.test(currency)) errors.push(`Row ${rowNo}: Currency must be a 3-letter code`);
     if (approvers.length === 0) errors.push(`Row ${rowNo}: at least Approver 1 is required`);
+    for (const a of approvers) {
+      if (a.type === 'tier' && !['3', '4', '5'].includes(a.value)) {
+        errors.push(`Row ${rowNo}: tier descriptors must be tier:3, tier:4 or tier:5 (got "tier:${a.value}")`);
+      }
+    }
     if (Number.isNaN(quotes) || quotes < 0 || quotes > 10 || !Number.isInteger(quotes)) {
       errors.push(`Row ${rowNo}: Quotes Required must be a whole number between 0 and 10`);
     }
@@ -227,6 +235,7 @@ export async function validateDoaRules(
              AND (ra.cost_centre_id = $1 OR ra.cost_centre_id IS NULL)
            WHERE u.status = 'active'
              AND ($3::text = 'role'
+                  OR ($3::text = 'tier' AND ra.tier::text = $2)
                   OR ($3::text = 'job_title' AND lower(u.job_title) = lower($2))
                   OR ($3::text = 'user' AND lower(u.email) = lower($2)))`,
           [scope, a.value, a.type],
@@ -239,7 +248,9 @@ export async function validateDoaRules(
         const who =
           a.type === 'role'
             ? 'no active user holds the approver role'
-            : `no active user matching "${a.value}" holds the approver role`;
+            : a.type === 'tier'
+              ? `no active user holds a Tier ${a.value} approver grant`
+              : `no active user matching "${a.value}" holds the approver role`;
         const message =
           `Row ${rule.rowNo}: ${who} for cost centre${unresolved.length > 1 ? 's' : ''} ${unresolved.join(', ')} — ` +
           'requisitions in those cost centres cannot be routed by this rule';

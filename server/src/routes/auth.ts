@@ -70,7 +70,7 @@ export default async function authRoutes(app: FastifyInstance, opts: { db: Db; c
         )
         .join('');
       return reply.type('text/html').send(
-        `<!doctype html><title>DEV sign-in</title><body style="font-family:system-ui;max-width:40rem;margin:3rem auto">
+        `<!doctype html><meta charset="utf-8"><title>DEV sign-in</title><body style="font-family:system-ui;max-width:40rem;margin:3rem auto">
          <h1>Development sign-in</h1>
          <p><strong>Synthetic users only (A.8.33).</strong> This page cannot exist in production.</p>
          <ul>${items}</ul></body>`,

@@ -27,11 +27,20 @@ export default async function meRoutes(app: FastifyInstance, opts: { db: Db; con
 
   app.get('/api/me', { preHandler: requireAuth() }, async (req) => {
     const u = req.currentUser!;
+    // Home department (client change list, "Overall UI"): display/attribution
+    // only — authority still flows from roles_assignments (A.5.15).
+    const dept = await db.query<{ id: string; code: string; name: string; department: string }>(
+      `SELECT cc.id, cc.code, cc.name, cc.department
+       FROM users u JOIN cost_centres cc ON cc.id = u.home_cost_centre_id
+       WHERE u.id = $1`,
+      [u.id],
+    );
     return {
       id: u.id,
       email: u.email,
       displayName: u.displayName,
       jobTitle: u.jobTitle,
+      department: dept.rows[0] ?? null,
       roles: u.roles,
       bannerAcknowledged: u.bannerAcknowledged,
       banner: u.bannerAcknowledged ? undefined : { version: config.bannerVersion, ...ACCEPTABLE_USE_BANNER },

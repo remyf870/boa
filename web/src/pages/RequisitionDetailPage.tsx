@@ -105,8 +105,8 @@ export function RequisitionDetailPage() {
   return (
     <div>
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="flex items-center gap-3 text-lg font-semibold text-slate-900">
+        <div className="min-w-0">
+          <h1 className="flex flex-wrap items-center gap-3 text-lg font-semibold text-slate-900">
             {r.reference} <StatusBadge status={r.status} />
           </h1>
           <p className="mt-1 text-sm text-slate-500">
@@ -173,19 +173,19 @@ export function RequisitionDetailPage() {
       <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
         <section className="rounded-md border border-slate-200 bg-white p-4">
           <h2 className="text-sm font-semibold text-slate-900">Details</h2>
-          <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+          <dl className="mt-2 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
             <dt className="text-slate-500">Amount</dt>
             <dd className="font-medium tabular-nums">
               <Money amount={r.amount} currency={r.currency} />
             </dd>
             <dt className="text-slate-500">Supplier</dt>
-            <dd>{r.supplier_name ?? "—"}</dd>
+            <dd className="break-words">{r.supplier_name ?? "—"}</dd>
             <dt className="text-slate-500">Needed by</dt>
             <dd>{r.needed_by ? formatDate(r.needed_by) : "—"}</dd>
             <dt className="text-slate-500">Description</dt>
-            <dd>{r.description}</dd>
+            <dd className="break-words">{r.description}</dd>
             <dt className="text-slate-500">Justification</dt>
-            <dd>{r.justification}</dd>
+            <dd className="break-words">{r.justification}</dd>
             <dt className="text-slate-500">Classification</dt>
             <dd>{r.classification}</dd>
           </dl>
@@ -197,7 +197,7 @@ export function RequisitionDetailPage() {
           <ol className="mt-2 space-y-2">
             {steps.map((s) => (
               <li key={s.id} className="flex items-start justify-between gap-2 rounded border border-slate-100 bg-slate-50 px-3 py-2 text-sm">
-                <div>
+                <div className="min-w-0">
                   <p className="font-medium text-slate-900">
                     {s.step_no}. {s.assigned_name ?? "—"}
                     {s.delegate_of_name ? <span className="text-slate-500"> (delegate of {s.delegate_of_name})</span> : null}
@@ -224,20 +224,20 @@ export function RequisitionDetailPage() {
         </section>
 
         <section className="rounded-md border border-slate-200 bg-white p-4">
-          <h2 className="text-sm font-semibold text-slate-900">Attachments</h2>
+          <h2 className="text-sm font-semibold text-slate-900">Quotations/Estimate</h2>
           {attachments.length === 0 ? <p className="mt-2 text-sm text-slate-500">None.</p> : null}
           <ul className="mt-2 space-y-1 text-sm">
             {attachments.map((a) => (
               <li key={a.id} className="flex items-center justify-between gap-2">
-                <span>
+                <span className="flex min-w-0 items-baseline">
                   {a.scan_status === "clean" ? (
-                    <a className="text-slate-900 underline-offset-2 hover:underline" href={`/api/attachments/${a.id}/download`}>
+                    <a className="truncate text-slate-900 underline-offset-2 hover:underline" href={`/api/attachments/${a.id}/download`}>
                       {a.filename}
                     </a>
                   ) : (
-                    <span className="text-slate-400">{a.filename}</span>
+                    <span className="truncate text-slate-400">{a.filename}</span>
                   )}
-                  <span className="ml-2 text-xs text-slate-400">
+                  <span className="ml-2 shrink-0 text-xs text-slate-400">
                     {a.type} · {(a.size_bytes / 1024).toFixed(0)} KB
                   </span>
                 </span>
@@ -253,7 +253,7 @@ export function RequisitionDetailPage() {
           <ul className="mt-2 space-y-2 text-sm">
             {invoices.map((i) => (
               <li key={i.id} className="flex items-center justify-between gap-2 rounded border border-slate-100 bg-slate-50 px-3 py-2">
-                <div>
+                <div className="min-w-0">
                   <p className="font-medium">
                     {i.invoice_no} · <Money amount={i.amount} currency={i.currency} />
                   </p>

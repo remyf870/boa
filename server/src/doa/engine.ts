@@ -8,14 +8,17 @@
 //   { "type": "job_title", "value": "Finance Manager" }
 //   { "type": "user",      "value": "someone@massymotors.com" }
 //   { "type": "role",      "value": "approver" }        (any approver of the cost centre)
+//   { "type": "tier",      "value": "5" }               (approvers granted that DOA tier)
 // Every descriptor resolves to users holding the 'approver' role for the
 // requisition's cost centre — a job title alone never grants authority
-// (A.5.15: authority flows from role grants only).
+// (A.5.15: authority flows from role grants only). Tier descriptors express
+// the client's tiered DOA (Tier 5 supervisors → Tier 4 senior managers →
+// Tier 3 executive) and match the `tier` attribute on the approver grant.
 import { z } from 'zod';
 import type pg from 'pg';
 
 const descriptorSchema = z.object({
-  type: z.enum(['job_title', 'user', 'role']),
+  type: z.enum(['job_title', 'user', 'role', 'tier']),
   value: z.string().min(1),
   label: z.string().optional(),
 });
@@ -166,6 +169,22 @@ async function resolveDescriptor(
       costCentreId,
       descriptor.value,
     ]);
+    return rows;
+  }
+  if (descriptor.type === 'tier') {
+    // Tier lives on the approver GRANT, not the user — rebuild the join with
+    // the tier condition inside it so only grants of that tier qualify.
+    const { rows } = await client.query<Candidate>(
+      `SELECT u.id, u.display_name, u.job_title, min(ra.granted_at) AS granted_at
+       FROM users u
+       JOIN roles_assignments ra ON ra.user_id = u.id
+         AND ra.role = 'approver'
+         AND ra.revoked_at IS NULL
+         AND (ra.cost_centre_id = $1 OR ra.cost_centre_id IS NULL)
+         AND ra.tier = $2
+       WHERE u.status = 'active'` + order,
+      [costCentreId, Number(descriptor.value)],
+    );
     return rows;
   }
   const { rows } = await client.query<Candidate>(base + order, [costCentreId]);

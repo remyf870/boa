@@ -59,7 +59,7 @@ export function AcceptableUseBanner({ onAcknowledge }: AcceptableUseBannerProps)
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-6"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 sm:p-6"
       onKeyDown={handleKeyDown}
     >
       <div
@@ -68,7 +68,7 @@ export function AcceptableUseBanner({ onAcknowledge }: AcceptableUseBannerProps)
         aria-modal="true"
         aria-labelledby="aup-title"
         aria-describedby="aup-body"
-        className="w-full max-w-lg rounded-lg border border-slate-200 bg-white p-8 shadow-xl"
+        className="max-h-[90dvh] w-full max-w-lg overflow-y-auto rounded-lg border border-slate-200 bg-white p-6 shadow-xl sm:p-8"
       >
         <h1 id="aup-title" className="text-lg font-semibold text-slate-900">
           Acceptable use notice

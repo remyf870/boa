@@ -4,13 +4,18 @@
 // (A.5.3, A.8.2 — enforced here AND by the SoD trigger in migration 0004).
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import ExcelJS from 'exceljs';
 import type { Config } from '../config.js';
 import { withUserContext, type Db } from '../db/pool.js';
 import { AuditAction, raiseAlert, verifyAuditChain, writeAudit } from '../audit/audit.js';
 import { buildLabelledWorkbook } from '../exports/excel.js';
 import { requireRoles } from '../plugins/rbac.js';
 import { NotificationTemplate, queueNotification } from '../notify/notifier.js';
-import { SETTING_KEYS, SettingValidationError, writeSetting, type SettingKey } from '../settings.js';
+import { readSetting, SETTING_KEYS, SettingValidationError, writeSetting, type SettingKey } from '../settings.js';
+import { detectFileKind } from '../files/magic.js';
+import { scanBuffer } from '../files/scanner.js';
+import { saveAttachmentFile, sha256Hex } from '../files/storage.js';
+import { notifySupplierApprovers, notifySupplierApproversBulk } from './suppliers.js';
 
 /**
  * §5.2/A.5.18: when a user is disabled or loses an approver grant, their
@@ -90,32 +95,140 @@ const ROLE_VALUES = [
   'budget_approver',
   'doa_admin',
   'doa_approver',
+  'supplier_approver',
   'auditor',
   'sysadmin',
 ] as const;
 
+const ORG_WIDE_ROLES = [
+  'sysadmin',
+  'auditor',
+  'accounting',
+  'doa_admin',
+  'budget_approver',
+  'doa_approver',
+  'supplier_approver',
+] as const;
+
 export default async function adminRoutes(app: FastifyInstance, opts: { db: Db; config: Config }) {
-  const { db } = opts;
+  const { db, config } = opts;
 
   // ── Users & roles (sysadmin) ───────────────────────────────────────────────
   app.get('/api/admin/users', { preHandler: requireRoles(db, 'sysadmin', 'auditor') }, async () => {
     const { rows } = await db.query(
       `SELECT u.id, u.email, u.display_name, u.job_title, u.status, u.last_login_at, u.created_at,
+              u.home_cost_centre_id,
+              hc.department AS home_department,
+              (u.entra_object_id LIKE 'pending-%') AS pending_first_login,
               coalesce(json_agg(json_build_object(
                 'assignmentId', ra.id,
                 'role', ra.role,
                 'costCentreId', ra.cost_centre_id,
                 'costCentreCode', cc.code,
+                'tier', ra.tier,
                 'grantedAt', ra.granted_at,
                 'grantedReason', ra.granted_reason
               ) ORDER BY ra.granted_at) FILTER (WHERE ra.id IS NOT NULL), '[]') AS roles
        FROM users u
+       LEFT JOIN cost_centres hc ON hc.id = u.home_cost_centre_id
        LEFT JOIN roles_assignments ra ON ra.user_id = u.id AND ra.revoked_at IS NULL
        LEFT JOIN cost_centres cc ON cc.id = ra.cost_centre_id
-       GROUP BY u.id
+       GROUP BY u.id, hc.department
        ORDER BY u.display_name`,
     );
     return { users: rows };
+  });
+
+  // ── Pre-provision a user (client change list, "System Admin UI") ───────────
+  // The row exists with a placeholder identity and NO roles (default-deny,
+  // A.5.15); the admin then grants roles through the normal endpoint. On the
+  // person's first real sign-in, provisioning claims the row by email match
+  // (auth/provision.ts), so access works from day one without a prior login.
+  app.post('/api/admin/users', { preHandler: requireRoles(db, 'sysadmin') }, async (req, reply) => {
+    const actor = req.currentUser!;
+    const body = z
+      .object({
+        email: z.string().email().max(320),
+        displayName: z.string().min(1).max(200),
+        jobTitle: z.string().max(200).nullish(),
+        homeCostCentreId: z.string().uuid().nullish(),
+      })
+      .safeParse(req.body);
+    if (!body.success) {
+      return reply.code(400).send({ error: 'invalid_request', message: body.error.issues[0]?.message });
+    }
+    // The row will be CLAIMED by whoever first signs in with this email
+    // (auth/provision.ts) — a typo'd or external domain would hand the
+    // pre-granted roles to the wrong identity (adversarial-review finding).
+    // The allowlist is data (app_settings, §0.3); empty = any domain.
+    const allowedDomains = await readSetting(db, 'allowed_email_domains');
+    if (allowedDomains.length > 0) {
+      const domain = body.data.email.split('@').pop()?.toLowerCase() ?? '';
+      if (!allowedDomains.some((d) => d.toLowerCase() === domain)) {
+        return reply.code(400).send({
+          error: 'email_domain_not_allowed',
+          message: `Pre-provisioned users must use an allowed email domain (${allowedDomains.join(', ')})`,
+        });
+      }
+    }
+    if (body.data.homeCostCentreId) {
+      const cc = await db.query<{ active: boolean }>('SELECT active FROM cost_centres WHERE id = $1', [
+        body.data.homeCostCentreId,
+      ]);
+      if (!cc.rows[0]?.active) return reply.code(400).send({ error: 'department_not_found' });
+    }
+    try {
+      const { rows } = await db.query<{ id: string }>(
+        `INSERT INTO users (entra_object_id, email, display_name, job_title, home_cost_centre_id)
+         VALUES ('pending-' || gen_random_uuid(), $1, $2, $3, $4)
+         RETURNING id`,
+        [body.data.email, body.data.displayName, body.data.jobTitle ?? null, body.data.homeCostCentreId ?? null],
+      );
+      await writeAudit(db, {
+        actorUserId: actor.id,
+        action: 'user.pre_provisioned',
+        entityType: 'user',
+        entityId: rows[0]!.id,
+        after: { ...body.data },
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent'] ?? null,
+      });
+      return reply.code(201).send({ ok: true, id: rows[0]!.id });
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('users_email_lower_uq')) {
+        return reply.code(409).send({ error: 'email_already_exists' });
+      }
+      throw err;
+    }
+  });
+
+  // Home department is display/attribution only — never authority (A.5.15).
+  app.post('/api/admin/users/:id/department', { preHandler: requireRoles(db, 'sysadmin') }, async (req, reply) => {
+    const actor = req.currentUser!;
+    const params = z.object({ id: z.string().uuid() }).safeParse(req.params);
+    const body = z.object({ homeCostCentreId: z.string().uuid().nullable() }).safeParse(req.body);
+    if (!params.success || !body.success) return reply.code(400).send({ error: 'invalid_request' });
+    if (body.data.homeCostCentreId) {
+      const cc = await db.query<{ active: boolean }>('SELECT active FROM cost_centres WHERE id = $1', [
+        body.data.homeCostCentreId,
+      ]);
+      if (!cc.rows[0]?.active) return reply.code(400).send({ error: 'department_not_found' });
+    }
+    const result = await db.query(
+      'UPDATE users SET home_cost_centre_id = $2, updated_at = now() WHERE id = $1',
+      [params.data.id, body.data.homeCostCentreId],
+    );
+    if ((result.rowCount ?? 0) === 0) return reply.code(404).send({ error: 'not_found' });
+    await writeAudit(db, {
+      actorUserId: actor.id,
+      action: 'user.department_changed',
+      entityType: 'user',
+      entityId: params.data.id,
+      after: { homeCostCentreId: body.data.homeCostCentreId },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'] ?? null,
+    });
+    return { ok: true };
   });
 
   app.post('/api/admin/users/:id/status', { preHandler: requireRoles(db, 'sysadmin') }, async (req, reply) => {
@@ -164,24 +277,34 @@ export default async function adminRoutes(app: FastifyInstance, opts: { db: Db; 
       .object({
         role: z.enum(ROLE_VALUES),
         costCentreId: z.string().uuid().nullish(),
+        // DOA tier for approver grants (client tiered model): 5 = supervisors,
+        // 4 = senior managers/VPs, 3 = executive.
+        tier: z.union([z.literal(3), z.literal(4), z.literal(5)]).nullish(),
         reason: z.string().min(3).max(1000), // A.5.18: the "why" is mandatory
       })
       .superRefine((b, ctx) => {
         // Org-wide roles are org-wide, full stop (mirrors the DB CHECK
         // org_wide_roles_have_no_cost_centre): a "scoped sysadmin/auditor"
         // would satisfy org-wide role checks with over-broad effect.
-        if (['sysadmin', 'auditor', 'accounting', 'doa_admin', 'budget_approver', 'doa_approver'].includes(b.role) && b.costCentreId) {
+        if ((ORG_WIDE_ROLES as readonly string[]).includes(b.role) && b.costCentreId) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
-            message: `${b.role} is an organisation-wide role and cannot be scoped to a cost centre`,
+            message: `${b.role} is an organisation-wide role and cannot be scoped to a department`,
             path: ['costCentreId'],
           });
         }
         if (['requester', 'approver', 'budget_owner'].includes(b.role) && !b.costCentreId) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
-            message: `${b.role} must be scoped to a cost centre`,
+            message: `${b.role} must be scoped to a department`,
             path: ['costCentreId'],
+          });
+        }
+        if (b.tier != null && b.role !== 'approver') {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'a DOA tier applies only to approver grants',
+            path: ['tier'],
           });
         }
       })
@@ -208,9 +331,16 @@ export default async function adminRoutes(app: FastifyInstance, opts: { db: Db; 
 
     try {
       const inserted = await db.query<{ id: string }>(
-        `INSERT INTO roles_assignments (user_id, role, cost_centre_id, granted_by, granted_reason)
-         VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-        [params.data.id, body.data.role, body.data.costCentreId ?? null, actor.id, body.data.reason],
+        `INSERT INTO roles_assignments (user_id, role, cost_centre_id, tier, granted_by, granted_reason)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+        [
+          params.data.id,
+          body.data.role,
+          body.data.costCentreId ?? null,
+          body.data.tier ?? null,
+          actor.id,
+          body.data.reason,
+        ],
       );
       await writeAudit(db, {
         actorUserId: actor.id,
@@ -221,6 +351,7 @@ export default async function adminRoutes(app: FastifyInstance, opts: { db: Db; 
           userId: params.data.id,
           role: body.data.role,
           costCentreId: body.data.costCentreId ?? null,
+          tier: body.data.tier ?? null,
           reason: body.data.reason,
         },
         ipAddress: req.ip,
@@ -265,15 +396,18 @@ export default async function adminRoutes(app: FastifyInstance, opts: { db: Db; 
       'UPDATE roles_assignments SET revoked_at = now(), revoked_by = $2, revoked_reason = $3 WHERE id = $1',
       [grant.id, actor.id, body.data.reason],
     );
-    if (grant.role === 'approver') {
+    if (grant.role === 'approver' || grant.role === 'accounting') {
       // Pending steps that relied on this grant are now undecidable — unless
       // another live grant still covers them, in which case the function
       // finds no orphans to move (it re-checks eligibility per step).
+      // Accounting revocations orphan finance_review steps the same way
+      // approver revocations orphan DOA steps; app_reassign_orphaned_steps
+      // handles both purposes.
       const stillCovered = await db.query<{ n: string }>(
         `SELECT count(*)::text AS n FROM roles_assignments
-         WHERE user_id = $1 AND role = 'approver' AND revoked_at IS NULL
+         WHERE user_id = $1 AND role = $3 AND revoked_at IS NULL
            AND ($2::uuid IS NULL OR cost_centre_id IS NULL OR cost_centre_id = $2)`,
-        [grant.user_id, grant.cost_centre_id],
+        [grant.user_id, grant.cost_centre_id, grant.role],
       );
       if (Number(stillCovered.rows[0]!.n) === 0) {
         await reassignOrphanedSteps(db, actor.id, grant.user_id, grant.cost_centre_id, {
@@ -601,6 +735,13 @@ export default async function adminRoutes(app: FastifyInstance, opts: { db: Db; 
     }
   });
 
+  // A supplier the sysadmin records still needs approval by a
+  // supplier_approver before it can be used on requisitions (client change
+  // list: the approved-supplier list is a two-person control). SoD binds one
+  // user ROW — the sysadmin's own row can never hold supplier_approver; the
+  // residual risk of one human controlling a second pre-provisioned identity
+  // is alerted on at claim time (auth/provision.ts) and reviewed via the
+  // claimedPreProvisioned audit trail.
   app.post('/api/admin/suppliers', { preHandler: requireRoles(db, 'sysadmin') }, async (req, reply) => {
     const actor = req.currentUser!;
     // A.5.34: deliberately no bank/payment fields — they belong in CDK
@@ -609,24 +750,162 @@ export default async function adminRoutes(app: FastifyInstance, opts: { db: Db; 
         name: z.string().min(1).max(200),
         cdkVendorRef: z.string().max(30).nullish(),
         taxId: z.string().max(30).nullish(),
+        reason: z.string().max(1000).nullish(),
       })
       .safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'invalid_request' });
-    const { rows } = await db.query<{ id: string }>(
-      `INSERT INTO suppliers (name, cdk_vendor_ref, tax_id) VALUES ($1, $2, $3) RETURNING id`,
-      [body.data.name, body.data.cdkVendorRef ?? null, body.data.taxId ?? null],
+    const dup = await db.query<{ id: string }>(
+      `SELECT id FROM suppliers WHERE lower(name) = lower($1) AND status IN ('pending_approval', 'active')`,
+      [body.data.name],
     );
+    if (dup.rows[0]) return reply.code(409).send({ error: 'supplier_already_exists' });
+    let created: { id: string };
+    try {
+      const { rows } = await db.query<{ id: string }>(
+        `INSERT INTO suppliers (name, cdk_vendor_ref, tax_id, status, requested_by, requested_at, requested_reason)
+         VALUES ($1, $2, $3, 'pending_approval', $4, now(), $5) RETURNING id`,
+        [body.data.name, body.data.cdkVendorRef ?? null, body.data.taxId ?? null, actor.id, body.data.reason ?? null],
+      );
+      created = rows[0]!;
+    } catch (err) {
+      // suppliers_live_name_uq closes the read-then-insert race the friendly
+      // check above cannot (rows are undeletable, so a duplicate would be
+      // permanent) — same 409 either way.
+      if (err instanceof Error && err.message.includes('suppliers_live_name_uq')) {
+        return reply.code(409).send({ error: 'supplier_already_exists' });
+      }
+      throw err;
+    }
     await writeAudit(db, {
       actorUserId: actor.id,
-      action: 'supplier.created',
+      action: 'supplier.requested',
       entityType: 'supplier',
-      entityId: rows[0]!.id,
-      after: body.data,
+      entityId: created.id,
+      after: { ...body.data, status: 'pending_approval' },
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'] ?? null,
     });
-    return reply.code(201).send({ ok: true, id: rows[0]!.id });
+    await notifySupplierApprovers(db, actor.id, created.id);
+    return reply.code(201).send({ ok: true, id: created.id, status: 'pending_approval' });
   });
+
+  // ── Approved-supplier list bulk upload (client change list, "System Admin
+  //    UI"). Columns: Supplier Name | CDK Vendor Ref | Tax ID. Every row
+  //    lands as pending_approval; a supplier_approver activates them in-app
+  //    (the two-person rule applies to the list exactly as to single adds). ──
+  app.post(
+    '/api/admin/suppliers/upload',
+    { preHandler: requireRoles(db, 'sysadmin'), config: { rateLimit: { max: 10, timeWindow: '1 hour' } } },
+    async (req, reply) => {
+      const actor = req.currentUser!;
+      const file = await req.file();
+      if (!file) return reply.code(400).send({ error: 'file_required' });
+      const buffer = await file.toBuffer();
+      if (file.file.truncated) return reply.code(413).send({ error: 'file_too_large' });
+      const maxBytes = await readSetting(db, 'attachment_max_bytes');
+      if (buffer.length === 0 || buffer.length > maxBytes) {
+        return reply.code(413).send({ error: 'file_too_large', maxBytes });
+      }
+      const detected = detectFileKind(buffer);
+      if (!detected || detected.kind !== 'xlsx') return reply.code(415).send({ error: 'not_an_xlsx_file' });
+      const verdict = await scanBuffer(config, buffer);
+      if (verdict.status === 'infected') {
+        await writeAudit(db, {
+          actorUserId: actor.id,
+          action: AuditAction.AttachmentQuarantined,
+          entityType: 'attachment',
+          after: { filename: file.filename, signature: verdict.signature, context: 'supplier_upload' },
+          ipAddress: req.ip,
+          userAgent: req.headers['user-agent'] ?? null,
+        });
+        return reply.code(422).send({ error: 'file_failed_virus_scan' });
+      }
+
+      const wb = new ExcelJS.Workbook();
+      try {
+        await wb.xlsx.load(buffer as unknown as ArrayBuffer);
+      } catch {
+        return reply.code(422).send({ error: 'validation_failed', issues: ['File is not a readable .xlsx workbook'] });
+      }
+      const ws = wb.worksheets[0];
+      const issues: string[] = [];
+      const parsed: { rowNo: number; name: string; cdkVendorRef: string | null; taxId: string | null }[] = [];
+      let headerRowNo = 0;
+      ws?.eachRow((row, rowNo) => {
+        const c1 = String(row.getCell(1).value ?? '').trim();
+        if (headerRowNo === 0 && c1.toLowerCase().startsWith('supplier')) {
+          headerRowNo = rowNo;
+          return;
+        }
+        if (headerRowNo === 0 || rowNo <= headerRowNo || !c1) return;
+        if (c1.length > 200) issues.push(`Row ${rowNo}: supplier name exceeds 200 characters`);
+        parsed.push({
+          rowNo,
+          name: c1,
+          cdkVendorRef: String(row.getCell(2).value ?? '').trim() || null,
+          taxId: String(row.getCell(3).value ?? '').trim() || null,
+        });
+      });
+      if (headerRowNo === 0) issues.push('Header row not found — first column header must be "Supplier Name"');
+      if (parsed.length === 0) issues.push('The workbook contains no suppliers');
+      if (parsed.length > 500) issues.push('The workbook exceeds the 500-supplier limit — split the list');
+      const seenNames = new Set<string>();
+      for (const p of parsed) {
+        const key = p.name.toLowerCase();
+        if (seenNames.has(key)) issues.push(`Row ${p.rowNo}: supplier "${p.name}" appears twice`);
+        seenNames.add(key);
+      }
+      if (issues.length > 0) return reply.code(422).send({ error: 'validation_failed', issues });
+
+      const outcome = await withUserContext(db, actor.id, async (client) => {
+        const stored = await saveAttachmentFile(config, buffer, { quarantined: false });
+        const inserted = await client.query<{ id: string }>(
+          `INSERT INTO attachments (type, filename, content_type, size_bytes, sha256, storage_key,
+                                    scan_status, uploaded_by, classification)
+           VALUES ('supplier_import', $1, $2, $3, $4, $5, 'clean', $6, 'internal')
+           RETURNING id`,
+          [file.filename, detected.contentType, buffer.length, sha256Hex(buffer), stored.storageKey, actor.id],
+        );
+        const sourceFileId = inserted.rows[0]!.id;
+        const created: string[] = [];
+        const skipped: string[] = [];
+        for (const p of parsed) {
+          // ON CONFLICT on the suppliers_live_name_uq partial index makes the
+          // duplicate check race-free inside this transaction (a plain failed
+          // INSERT would abort the whole batch; a pre-check would race
+          // concurrent single adds).
+          const row = await client.query<{ id: string }>(
+            `INSERT INTO suppliers (name, cdk_vendor_ref, tax_id, status, requested_by, requested_at,
+                                    requested_reason, source_file_id)
+             VALUES ($1, $2, $3, 'pending_approval', $4, now(), $5, $6)
+             ON CONFLICT ((lower(name))) WHERE status IN ('pending_approval', 'active') DO NOTHING
+             RETURNING id`,
+            [p.name, p.cdkVendorRef, p.taxId, actor.id, `Bulk upload: ${file.filename}`, sourceFileId],
+          );
+          if (row.rows[0]) created.push(row.rows[0].id);
+          else skipped.push(p.name);
+        }
+        await writeAudit(client, {
+          actorUserId: actor.id,
+          action: 'supplier.bulk_uploaded',
+          entityType: 'attachment',
+          entityId: sourceFileId,
+          after: { filename: file.filename, createdCount: created.length, skippedExisting: skipped },
+          ipAddress: req.ip,
+          userAgent: req.headers['user-agent'] ?? null,
+        });
+        return { created, skipped };
+      });
+      if (outcome.created.length > 0) {
+        await notifySupplierApproversBulk(db, actor.id, outcome.created.length);
+      }
+      return reply.code(201).send({
+        ok: true,
+        createdCount: outcome.created.length,
+        skippedExisting: outcome.skipped,
+      });
+    },
+  );
 
   // Deactivation is a flag, never a delete (A.5.33)
   app.post(
@@ -646,12 +925,15 @@ export default async function adminRoutes(app: FastifyInstance, opts: { db: Db; 
           : params.data.entity === 'cost-centres'
             ? 'cost_centres'
             : 'suppliers';
+      // A supplier flag toggle must never mint an approval: only an already
+      // active/inactive supplier can be toggled — pending_approval/rejected
+      // rows go through the supplier_approver workflow (two-person rule).
       const result =
         table === 'suppliers'
-          ? await db.query(`UPDATE suppliers SET status = $2 WHERE id = $1`, [
-              params.data.id,
-              body.data.active ? 'active' : 'inactive',
-            ])
+          ? await db.query(
+              `UPDATE suppliers SET status = $2 WHERE id = $1 AND status IN ('active', 'inactive')`,
+              [params.data.id, body.data.active ? 'active' : 'inactive'],
+            )
           : await db.query(`UPDATE ${table} SET active = $2 WHERE id = $1`, [params.data.id, body.data.active]);
       if ((result.rowCount ?? 0) === 0) return reply.code(404).send({ error: 'not_found' });
       await writeAudit(db, {

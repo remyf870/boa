@@ -12,6 +12,9 @@ export type SessionVia = 'entra' | 'dev' | 'break_glass';
 export interface RoleGrant {
   role: string;
   costCentreId: string | null;
+  /** DOA tier of an approver grant (5 = supervisor, 4 = senior manager/VP,
+   * 3 = executive); null/absent on non-approver grants. */
+  tier?: number | null;
 }
 
 export interface CurrentUser {
@@ -108,8 +111,8 @@ export async function resolveSession(
 
   await db.query('UPDATE sessions SET last_seen_at = now() WHERE id = $1', [row.session_id]);
 
-  const roleRows = await db.query<{ role: string; cost_centre_id: string | null }>(
-    'SELECT role, cost_centre_id FROM roles_assignments WHERE user_id = $1 AND revoked_at IS NULL',
+  const roleRows = await db.query<{ role: string; cost_centre_id: string | null; tier: number | null }>(
+    'SELECT role, cost_centre_id, tier FROM roles_assignments WHERE user_id = $1 AND revoked_at IS NULL',
     [row.user_id],
   );
 
@@ -121,7 +124,7 @@ export async function resolveSession(
       jobTitle: row.job_title,
       status: row.status,
       bannerAcknowledged: row.banner_acknowledged_at !== null && row.banner_version === config.bannerVersion,
-      roles: roleRows.rows.map((r) => ({ role: r.role, costCentreId: r.cost_centre_id })),
+      roles: roleRows.rows.map((r) => ({ role: r.role, costCentreId: r.cost_centre_id, tier: r.tier })),
       sessionId: row.session_id,
       csrfToken: row.csrf_token,
       via: row.via,

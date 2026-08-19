@@ -44,7 +44,7 @@ export function DashboardPage() {
               ) : null}
             </div>
           ) : null}
-          <h2 className="mt-6 text-sm font-medium text-slate-600">Budget position by cost centre (live figures on the Budgets page)</h2>
+          <h2 className="mt-6 text-sm font-medium text-slate-600">Budget position by department (live figures on the Budgets page)</h2>
           <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
             {dashboard.data.budgetPositions.map((b) => (
               <Link key={b.costCentreId} to="/budgets" className="rounded-md border border-slate-200 bg-white p-4 hover:border-slate-300 hover:bg-slate-50">
@@ -66,7 +66,7 @@ export function DashboardPage() {
               </Link>
             ))}
             {dashboard.data.budgetPositions.length === 0 ? (
-              <p className="text-sm text-slate-400">No cost centres visible to your roles.</p>
+              <p className="text-sm text-slate-400">No departments visible to your roles.</p>
             ) : null}
           </div>
         </>

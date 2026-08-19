@@ -52,7 +52,7 @@ export function LogbookPage() {
           <h1 className="text-lg font-semibold text-slate-900">Logbook</h1>
           <p className="mt-1 text-sm text-slate-500">Every requisition ever raised, with its full approval trail.</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Button onClick={() => void saveCurrent()}>Save filter</Button>
           <a
             className="rounded bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700"
@@ -72,8 +72,8 @@ export function LogbookPage() {
             </option>
           ))}
         </select>
-        <select className={inputClass} value={filter.costCentreId} onChange={(e) => set("costCentreId")(e.target.value)} aria-label="Cost centre">
-          <option value="">All cost centres</option>
+        <select className={inputClass} value={filter.costCentreId} onChange={(e) => set("costCentreId")(e.target.value)} aria-label="Department">
+          <option value="">All departments</option>
           {reference.data?.costCentres.map((cc) => (
             <option key={cc.id} value={cc.id}>
               {cc.code}
@@ -95,8 +95,8 @@ export function LogbookPage() {
           <div className="col-span-full flex flex-wrap items-center gap-1.5 text-xs">
             <span className="text-slate-400">Saved:</span>
             {saved.data.filters.map((f) => (
-              <span key={f.id} className="flex items-center overflow-hidden rounded border border-slate-200">
-                <button type="button" className="bg-slate-50 px-2 py-1 hover:bg-slate-100" onClick={() => setFilter({ ...EMPTY, ...f.filter })}>
+              <span key={f.id} className="flex max-w-full items-center overflow-hidden rounded border border-slate-200">
+                <button type="button" className="min-w-0 truncate bg-slate-50 px-2 py-1 hover:bg-slate-100" onClick={() => setFilter({ ...EMPTY, ...f.filter })}>
                   {f.name}
                 </button>
                 <button
@@ -122,7 +122,7 @@ export function LogbookPage() {
           <table className="w-full min-w-[1100px] text-left text-sm">
             <thead className="border-b border-slate-200 bg-slate-50 text-xs text-slate-500">
               <tr>
-                {["Reference", "Date", "Requester", "Cost centre", "Category", "Supplier", "Amount", "Status", "Approvals", "Invoice", "CDK"].map((h) => (
+                {["Reference", "Date", "Requester", "Department", "Category", "Supplier", "Amount", "Status", "Approvals", "Invoice", "CDK"].map((h) => (
                   <th key={h} className="px-3 py-2 font-medium">
                     {h}
                   </th>
@@ -139,7 +139,7 @@ export function LogbookPage() {
                   </td>
                   <td className="px-3 py-2 text-slate-500">{formatDate(r.created_at)}</td>
                   <td className="px-3 py-2">{r.requester_name}</td>
-                  <td className="px-3 py-2">{r.cost_centre_code}</td>
+                  <td className="px-3 py-2">{r.department ?? r.cost_centre_code}</td>
                   <td className="px-3 py-2">{r.category_code}</td>
                   <td className="px-3 py-2">{r.supplier_name ?? "—"}</td>
                   <td className="px-3 py-2 tabular-nums">

@@ -20,6 +20,7 @@ import doaRoutes from './routes/doa.js';
 import attachmentRoutes from './routes/attachments.js';
 import invoiceRoutes from './routes/invoices.js';
 import budgetRoutes from './routes/budgets.js';
+import supplierRoutes from './routes/suppliers.js';
 import accountingRoutes from './routes/accounting.js';
 import logbookRoutes from './routes/logbook.js';
 import dashboardRoutes from './routes/dashboard.js';
@@ -39,7 +40,15 @@ export async function buildApp(config: Config, db: Db): Promise<FastifyInstance>
     bodyLimit: 1024 * 1024, // 1 MiB JSON bodies; file uploads get their own route + limits in Phase 2
   });
 
-  // A.8.28: CSP, HSTS, X-Frame-Options, X-Content-Type-Options
+  // A.8.28: CSP, HSTS, X-Frame-Options, X-Content-Type-Options.
+  // HSTS and upgrade-insecure-requests are sent only when the deployment is
+  // actually served over TLS — same derivation as the Secure cookie flag in
+  // routes/auth.ts. Emitting them from a plain-http dev server poisons the
+  // browser's HSTS store for the host (Safari then refuses the origin outright
+  // for two years, including on LAN test devices).
+  const httpsDeployment =
+    config.NODE_ENV === 'production' || new URL(config.APP_BASE_URL).protocol === 'https:';
+
   await app.register(helmet, {
     contentSecurityPolicy: {
       directives: {
@@ -52,12 +61,15 @@ export async function buildApp(config: Config, db: Db): Promise<FastifyInstance>
         objectSrc: ["'none'"],
         baseUri: ["'self'"],
         formAction: ["'self'"],
+        upgradeInsecureRequests: httpsDeployment ? [] : null,
       },
     },
-    strictTransportSecurity: {
-      maxAge: 63072000,
-      includeSubDomains: true,
-    },
+    strictTransportSecurity: httpsDeployment
+      ? {
+          maxAge: 63072000,
+          includeSubDomains: true,
+        }
+      : false,
     xFrameOptions: { action: 'deny' },
   });
 
@@ -91,6 +103,7 @@ export async function buildApp(config: Config, db: Db): Promise<FastifyInstance>
   await app.register(attachmentRoutes, { db, config });
   await app.register(invoiceRoutes, { db, config });
   await app.register(budgetRoutes, { db, config });
+  await app.register(supplierRoutes, { db, config });
   await app.register(accountingRoutes, { db, config });
   await app.register(logbookRoutes, { db, config });
   await app.register(dashboardRoutes, { db, config });

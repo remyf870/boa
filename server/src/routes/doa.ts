@@ -52,7 +52,7 @@ export default async function doaRoutes(app: FastifyInstance, opts: { db: Db; co
       ws.addRow([`Exported by: ${actor.displayName} <${actor.email}>`]);
       ws.addRow([`Exported at (UTC): ${new Date().toISOString()}`]);
       ws.addRow([
-        'Approver cells: "job_title:Finance Manager", "user:name@domain", or "role:approver". ' +
+        'Approver cells: "tier:5" (DOA tier), "job_title:Finance Manager", "user:name@domain", or "role:approver". ' +
           'A bare value containing "@" is read as a user email; any other bare value as a job title — ' +
           'prefer the explicit type:value form.',
       ]);

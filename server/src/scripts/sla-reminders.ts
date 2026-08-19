@@ -18,6 +18,7 @@ const escalationDays = await readSetting(db, 'sla_escalation_days');
 interface OverdueStep {
   id: string;
   assigned_user_id: string;
+  purpose: string;
   requisition_id: string;
   reference: string;
   opened_at: Date;
@@ -25,11 +26,27 @@ interface OverdueStep {
   escalated_at: Date | null;
 }
 
+/** finance_review steps are role-addressed (any active accounting holder may
+ * decide them — see approvals.ts), so their reminders/escalations go to every
+ * accounting holder, not only the nominal assignee: re-notifying one absent
+ * person forever was exactly the freeze the role-addressing fix removed. */
+async function recipientsFor(step: OverdueStep): Promise<string[]> {
+  if (step.purpose !== 'finance_review') return [step.assigned_user_id];
+  const { rows } = await db.query<{ user_id: string }>(
+    `SELECT DISTINCT ra.user_id FROM roles_assignments ra
+     JOIN users u ON u.id = ra.user_id AND u.status = 'active'
+     WHERE ra.role = 'accounting' AND ra.revoked_at IS NULL`,
+  );
+  return rows.length > 0 ? rows.map((r) => r.user_id) : [step.assigned_user_id];
+}
+
 // A step is "open" when it is pending, its requisition is submitted, and every
 // earlier step approved. It "opened" when the previous step decided (step 1:
-// at submission).
+// at submission). finance_review steps (the Accounts final hurdle, migration
+// 0014) sit after every DOA step and get the same reminders — a stalled
+// accounting review blocks approval exactly like a stalled approver.
 const { rows: overdue } = await db.query<OverdueStep>(
-  `SELECT st.id, st.assigned_user_id, st.requisition_id, r.reference,
+  `SELECT st.id, st.assigned_user_id, st.purpose, st.requisition_id, r.reference,
           coalesce(prev.decided_at, r.submitted_at) AS opened_at,
           st.reminder_sent_at, st.escalated_at
    FROM approval_steps st
@@ -37,11 +54,13 @@ const { rows: overdue } = await db.query<OverdueStep>(
    LEFT JOIN LATERAL (
      SELECT max(p.decided_at) AS decided_at
      FROM approval_steps p
-     WHERE p.requisition_id = st.requisition_id AND p.purpose = 'doa' AND p.step_no < st.step_no
+     WHERE p.requisition_id = st.requisition_id AND p.purpose IN ('doa', 'finance_review')
+       AND p.step_no < st.step_no
    ) prev ON true
-   WHERE st.decision = 'pending' AND st.purpose = 'doa'
+   WHERE st.decision = 'pending' AND st.purpose IN ('doa', 'finance_review')
      AND NOT EXISTS (SELECT 1 FROM approval_steps b
-                     WHERE b.requisition_id = st.requisition_id AND b.purpose = 'doa'
+                     WHERE b.requisition_id = st.requisition_id
+                       AND b.purpose IN ('doa', 'finance_review')
                        AND b.step_no < st.step_no AND b.decision <> 'approved')
      AND coalesce(prev.decided_at, r.submitted_at) < now() - make_interval(days => $1)`,
   [reminderDays],
@@ -54,12 +73,14 @@ for (const step of overdue) {
 
   if (ageDays >= escalationDays && step.escalated_at === null) {
     await db.query('UPDATE approval_steps SET escalated_at = now() WHERE id = $1', [step.id]);
-    await queueNotification(db, {
-      recipientUserId: step.assigned_user_id,
-      template: NotificationTemplate.ApprovalEscalation,
-      reference: step.reference,
-      deepLink: '/approvals',
-    });
+    for (const recipient of await recipientsFor(step)) {
+      await queueNotification(db, {
+        recipientUserId: recipient,
+        template: NotificationTemplate.ApprovalEscalation,
+        reference: step.reference,
+        deepLink: '/approvals',
+      });
+    }
     await writeAudit(db, {
       actorUserId: null,
       action: AuditAction.SlaEscalated,
@@ -70,12 +91,14 @@ for (const step of overdue) {
     escalations++;
   } else if (step.reminder_sent_at === null) {
     await db.query('UPDATE approval_steps SET reminder_sent_at = now() WHERE id = $1', [step.id]);
-    await queueNotification(db, {
-      recipientUserId: step.assigned_user_id,
-      template: NotificationTemplate.ApprovalReminder,
-      reference: step.reference,
-      deepLink: '/approvals',
-    });
+    for (const recipient of await recipientsFor(step)) {
+      await queueNotification(db, {
+        recipientUserId: recipient,
+        template: NotificationTemplate.ApprovalReminder,
+        reference: step.reference,
+        deepLink: '/approvals',
+      });
+    }
     await writeAudit(db, {
       actorUserId: null,
       action: AuditAction.SlaReminderSent,

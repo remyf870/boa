@@ -82,10 +82,11 @@ export default async function approvalRoutes(app: FastifyInstance, opts: { db: D
     const rows = await withUserContext(db, user.id, async (client) => {
       const result = await client.query(
         `SELECT st.id AS step_id, st.step_no, st.purpose, st.assigned_user_id,
-                (st.assigned_user_id <> $1) AS via_delegation,
+                (st.assigned_user_id <> $1 AND st.purpose <> 'finance_review') AS via_delegation,
                 r.id AS requisition_id, r.reference, r.description, r.amount, r.currency,
                 r.submitted_at, r.needed_by, r.status AS requisition_status,
-                cc.code AS cost_centre_code, cat.code AS category_code, cat.name AS category_name,
+                cc.code AS cost_centre_code, cc.department AS department,
+                cat.code AS category_code, cat.name AS category_name,
                 u.display_name AS requester_name, s.name AS supplier_name,
                 i.id AS invoice_id, i.invoice_no, i.amount AS invoice_amount,
                 i.variance_vs_approved
@@ -97,23 +98,40 @@ export default async function approvalRoutes(app: FastifyInstance, opts: { db: D
          LEFT JOIN suppliers s ON s.id = r.supplier_id
          LEFT JOIN invoices i ON i.reapproval_step_id = st.id
          WHERE st.decision = 'pending'
-           -- The approver role must still be held: a revoked grant empties the
-           -- queue on the next request (A.5.18, adversarial-review finding).
-           AND app_user_has_role('approver', r.cost_centre_id)
-           AND (st.assigned_user_id = $1
-                OR app_user_is_delegate_for(st.assigned_user_id, r.cost_centre_id))
            AND (
-             (st.purpose = 'doa' AND r.status = 'submitted'
-              AND NOT EXISTS (SELECT 1 FROM approval_steps prev
-                              WHERE prev.requisition_id = st.requisition_id
-                                AND prev.purpose = 'doa'
-                                AND prev.step_no < st.step_no
-                                AND prev.decision <> 'approved'))
-             -- The invoice must still be WAITING on this decision: Accounting
-             -- rejecting it resolves the matter, and the step must not linger
-             -- as a ghost work item (review finding).
-             OR (st.purpose = 'variance_reapproval' AND r.status IN ('approved', 'closed')
-                 AND i.status = 'pending_reapproval')
+             -- Steps addressed to me, or delegable to me. The approver role
+             -- must still be held: a revoked grant empties the queue on the
+             -- next request (A.5.18, adversarial-review finding).
+             ((st.assigned_user_id = $1
+               OR app_user_is_delegate_for(st.assigned_user_id, r.cost_centre_id))
+              AND (
+                (st.purpose = 'doa' AND r.status = 'submitted'
+                 AND app_user_has_role('approver', r.cost_centre_id)
+                 AND NOT EXISTS (SELECT 1 FROM approval_steps prev
+                                 WHERE prev.requisition_id = st.requisition_id
+                                   AND prev.purpose = 'doa'
+                                   AND prev.step_no < st.step_no
+                                   AND prev.decision <> 'approved'))
+                -- The invoice must still be WAITING on this decision: Accounting
+                -- rejecting it resolves the matter, and the step must not linger
+                -- as a ghost work item (review finding).
+                OR (st.purpose = 'variance_reapproval' AND r.status IN ('approved', 'closed')
+                    AND app_user_has_role('approver', r.cost_centre_id)
+                    AND i.status = 'pending_reapproval')
+              ))
+             -- finance_review steps belong to the org-wide accounting ROLE,
+             -- not a person (client change list: Accounts is the final
+             -- hurdle). Any active accounting holder sees and may decide
+             -- them: accounting can never hold 'approver' (SoD), so
+             -- delegation cannot cover an absence — a person-addressed final
+             -- hurdle would freeze every requisition while its one assignee
+             -- is away (adversarial-review finding).
+             OR (st.purpose = 'finance_review' AND r.status = 'submitted'
+                 AND app_user_has_role('accounting')
+                 AND NOT EXISTS (SELECT 1 FROM approval_steps prev
+                                 WHERE prev.requisition_id = st.requisition_id
+                                   AND prev.purpose = 'doa'
+                                   AND prev.decision <> 'approved'))
            )
          ORDER BY r.submitted_at NULLS LAST, st.step_no`,
         [user.id],
@@ -221,26 +239,41 @@ export default async function approvalRoutes(app: FastifyInstance, opts: { db: D
         }
 
         // ── Authority is re-proved on every decision (A.5.15, A.5.18) ───────
-        // Being the assignee is not enough: the approver role for this cost
-        // centre must still be held right now. A revoked grant must lose
-        // decision power within one request, including on steps assigned
-        // before the revocation (adversarial-review finding).
-        if (!hasRole(user, 'approver', step.cost_centre_id)) {
+        // Being the assignee is not enough: the required role must still be
+        // held right now. A revoked grant must lose decision power within one
+        // request, including on steps assigned before the revocation
+        // (adversarial-review finding). finance_review steps are decided by
+        // the org-wide accounting role, everything else by the approver role
+        // for the requisition's cost centre.
+        const requiredRoleHeld =
+          step.purpose === 'finance_review'
+            ? hasRole(user, 'accounting')
+            : hasRole(user, 'approver', step.cost_centre_id);
+        if (!requiredRoleHeld) {
+          const reason =
+            step.purpose === 'finance_review' ? 'accounting_role_not_held' : 'approver_role_not_held';
           await writeAudit(client, {
             actorUserId: user.id,
             action: AuditAction.AccessDenied,
             entityType: 'approval_step',
             entityId: step.id,
-            after: { reason: 'approver_role_not_held', costCentreId: step.cost_centre_id },
+            after: { reason, costCentreId: step.cost_centre_id },
             ipAddress: req.ip,
             userAgent: req.headers['user-agent'] ?? null,
           });
-          return { code: 403 as const, error: 'approver_role_not_held' };
+          return { code: 403 as const, error: reason };
         }
 
         // ── Who may decide: the assignee, or their live delegate ────────────
+        // finance_review steps are role-addressed instead: ANY current
+        // accounting holder may decide (the role gate above), because
+        // accounting can never hold 'approver' (SoD) and so can never
+        // delegate — a person-addressed final hurdle would freeze every
+        // requisition while its one assignee is away (adversarial-review
+        // finding). The decision UPDATE below stamps the actual decider
+        // into assigned_user_id, so the record shows who decided.
         let delegateOf: string | null = null;
-        if (step.assigned_user_id !== user.id) {
+        if (step.assigned_user_id !== user.id && step.purpose !== 'finance_review') {
           const delegation = await client.query<{ id: string }>(
             `SELECT id FROM delegations
              WHERE delegator_id = $1 AND delegate_id = $2 AND revoked_at IS NULL
@@ -277,6 +310,15 @@ export default async function approvalRoutes(app: FastifyInstance, opts: { db: D
             `SELECT count(*)::text AS n FROM approval_steps
              WHERE requisition_id = $1 AND purpose = 'doa' AND step_no < $2 AND decision <> 'approved'`,
             [step.requisition_id, step.step_no],
+          );
+          if (Number(blockers.rows[0]!.n) > 0) return { code: 409 as const, error: 'previous_step_pending' };
+        } else if (step.purpose === 'finance_review') {
+          // Accounts reviews last: every DOA step must already be approved.
+          if (step.req_status !== 'submitted') return { code: 409 as const, error: 'requisition_not_open' };
+          const blockers = await client.query<{ n: string }>(
+            `SELECT count(*)::text AS n FROM approval_steps
+             WHERE requisition_id = $1 AND purpose = 'doa' AND decision <> 'approved'`,
+            [step.requisition_id],
           );
           if (Number(blockers.rows[0]!.n) > 0) return { code: 409 as const, error: 'previous_step_pending' };
         } else {
@@ -391,10 +433,19 @@ export default async function approvalRoutes(app: FastifyInstance, opts: { db: D
         }
 
         if (kind === 'deny') {
-          await client.query(
+          const denied = await client.query(
             `UPDATE requisitions SET status = 'denied', closed_at = now(), updated_at = now() WHERE id = $1`,
             [step.requisition_id],
           );
+          // A zero-row UPDATE here means RLS filtered the row: committing
+          // would record a denial that never persisted (audit, notification
+          // and API response all diverging from the database — adversarial-
+          // review finding). Throw → the transaction rolls back whole.
+          if (denied.rowCount !== 1) {
+            throw new Error(
+              `requisition ${step.requisition_id} denial updated ${denied.rowCount ?? 0} rows — RLS misconfiguration`,
+            );
+          }
           await queueNotification(client, {
             recipientUserId: step.requester_id,
             template: NotificationTemplate.RequisitionDenied,
@@ -414,31 +465,61 @@ export default async function approvalRoutes(app: FastifyInstance, opts: { db: D
         }
 
         // ── Approve: open the next step, or finalise ────────────────────────
-        const next = await client.query<{ id: string; assigned_user_id: string }>(
-          `SELECT id, assigned_user_id FROM approval_steps
-           WHERE requisition_id = $1 AND purpose = 'doa' AND decision = 'pending' AND step_no > $2
+        // The chain runs DOA steps first, then the accounting finance_review
+        // step (when configured); only after ALL of them is the requisition
+        // finalised.
+        const next = await client.query<{ id: string; assigned_user_id: string; purpose: string }>(
+          `SELECT id, assigned_user_id, purpose FROM approval_steps
+           WHERE requisition_id = $1 AND purpose IN ('doa', 'finance_review')
+             AND decision = 'pending' AND step_no > $2
            ORDER BY step_no LIMIT 1`,
           [step.requisition_id, step.step_no],
         );
         if (next.rows.length > 0) {
-          await queueNotification(client, {
-            recipientUserId: next.rows[0]!.assigned_user_id,
-            template: NotificationTemplate.ApprovalRequested,
-            reference: step.req_reference,
-            deepLink: `/approvals`,
-          });
+          const opened = next.rows[0]!;
+          if (opened.purpose === 'finance_review') {
+            // Role-addressed (see the queue): every active accounting holder
+            // is told the final review is open, not just the nominal assignee.
+            const accountants = await client.query<{ user_id: string }>(
+              `SELECT DISTINCT ra.user_id FROM roles_assignments ra
+               JOIN users u ON u.id = ra.user_id AND u.status = 'active'
+               WHERE ra.role = 'accounting' AND ra.revoked_at IS NULL`,
+            );
+            for (const a of accountants.rows) {
+              await queueNotification(client, {
+                recipientUserId: a.user_id,
+                template: NotificationTemplate.ApprovalRequested,
+                reference: step.req_reference,
+                deepLink: `/approvals`,
+              });
+            }
+          } else {
+            await queueNotification(client, {
+              recipientUserId: opened.assigned_user_id,
+              template: NotificationTemplate.ApprovalRequested,
+              reference: step.req_reference,
+              deepLink: `/approvals`,
+            });
+          }
           return { code: 200 as const, final: false, costCentreId: null };
         }
 
         // Final approval: issue the Approval Reference (plan §5.3) and commit
         // the amount against the budget (plan §4 design rule 2).
         const approvalReference = `${step.req_reference}-APR`;
-        await client.query(
+        const finalised = await client.query(
           `UPDATE requisitions
            SET status = 'approved', approved_at = now(), approval_reference = $2, updated_at = now()
            WHERE id = $1`,
           [step.requisition_id, approvalReference],
         );
+        // Same guard as the deny path: an RLS-filtered zero-row UPDATE must
+        // roll the whole decision back, never commit a phantom approval.
+        if (finalised.rowCount !== 1) {
+          throw new Error(
+            `requisition ${step.requisition_id} finalisation updated ${finalised.rowCount ?? 0} rows — RLS misconfiguration`,
+          );
+        }
         await queueNotification(client, {
           recipientUserId: step.requester_id,
           template: NotificationTemplate.RequisitionApproved,

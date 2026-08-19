@@ -26,7 +26,7 @@ const LOGBOOK_SQL = `
   SELECT r.id, r.reference, r.created_at, r.submitted_at, r.approved_at, r.closed_at,
          r.status, r.amount, r.currency, r.description, r.approval_reference,
          r.classification,
-         cc.code AS cost_centre_code, cat.code AS category_code,
+         cc.code AS cost_centre_code, cc.department AS department, cat.code AS category_code,
          u.display_name AS requester_name, s.name AS supplier_name,
          (SELECT json_agg(json_build_object(
             'stepNo', st.step_no, 'approverName', au.display_name,

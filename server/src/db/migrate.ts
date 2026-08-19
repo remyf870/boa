@@ -15,6 +15,21 @@ export interface MigrationResult {
   skipped: string[];
 }
 
+/** The on-disk migration inventory (name + LF-normalised SHA-256) in apply
+ * order. Shared by the runner below and the production startup currency
+ * guard (index.ts) so both always agree on the fingerprint. */
+export async function listMigrationFiles(): Promise<{ name: string; sha256: string }[]> {
+  const files = (await readdir(MIGRATIONS_DIR)).filter((f) => f.endsWith('.sql')).sort();
+  return Promise.all(
+    files.map(async (name) => {
+      const sql = await readFile(path.join(MIGRATIONS_DIR, name), 'utf8');
+      // Hash over LF-normalised content so Windows (CRLF) and Linux (LF)
+      // checkouts of the same commit agree on the fingerprint
+      return { name, sha256: createHash('sha256').update(sql.replace(/\r\n/g, '\n')).digest('hex') };
+    }),
+  );
+}
+
 export async function runMigrations(databaseUrl: string, log: (msg: string) => void = () => undefined): Promise<MigrationResult> {
   const client = new pg.Client({ connectionString: databaseUrl });
   await client.connect();
@@ -32,17 +47,13 @@ export async function runMigrations(databaseUrl: string, log: (msg: string) => v
         applied_at  timestamptz NOT NULL DEFAULT now()
       )`);
 
-    const files = (await readdir(MIGRATIONS_DIR)).filter((f) => f.endsWith('.sql')).sort();
+    const files = await listMigrationFiles();
     const { rows: done } = await client.query<{ name: string; sha256: string }>(
       'SELECT name, sha256 FROM schema_migrations',
     );
     const doneByName = new Map(done.map((r) => [r.name, r.sha256]));
 
-    for (const file of files) {
-      const sql = await readFile(path.join(MIGRATIONS_DIR, file), 'utf8');
-      // Hash over LF-normalised content so Windows (CRLF) and Linux (LF)
-      // checkouts of the same commit agree on the fingerprint
-      const hash = createHash('sha256').update(sql.replace(/\r\n/g, '\n')).digest('hex');
+    for (const { name: file, sha256: hash } of files) {
       const existing = doneByName.get(file);
       if (existing) {
         if (existing !== hash) {
@@ -54,6 +65,7 @@ export async function runMigrations(databaseUrl: string, log: (msg: string) => v
         skipped.push(file);
         continue;
       }
+      const sql = await readFile(path.join(MIGRATIONS_DIR, file), 'utf8');
       log(`applying ${file}`);
       await client.query('BEGIN');
       try {

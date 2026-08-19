@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api/client";
-import type { PreviewResponse, ReferenceData, RequisitionRow } from "../api/types";
-import { hasRole } from "../api/types";
+import type { PreviewResponse, ReferenceData, RequisitionDocument, RequisitionRow } from "../api/types";
+import { hasRole, requisitionDisplayStatus } from "../api/types";
 import { useAuth } from "../components/AuthProvider";
 import { useApiQuery } from "../hooks/useApi";
 import { Button, EmptyState, ErrorNote, Field, formatDate, inputClass, Modal, Money, StatusBadge } from "../components/ui";
@@ -83,11 +83,11 @@ function NewRequisitionModal({ reference, onClose }: { reference: ReferenceData;
   return (
     <Modal title="New requisition" onClose={() => onClose(null)}>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <Field label="Cost centre">
+        <Field label="Department">
           <select className={inputClass} value={form.costCentreId} onChange={(e) => set("costCentreId")(e.target.value)}>
             {requestableCostCentres.map((cc) => (
               <option key={cc.id} value={cc.id}>
-                {cc.code} — {cc.name}
+                {cc.department} — {cc.name}
               </option>
             ))}
           </select>
@@ -101,7 +101,7 @@ function NewRequisitionModal({ reference, onClose }: { reference: ReferenceData;
             ))}
           </select>
         </Field>
-        <Field label="Supplier" hint="Optional at draft stage">
+        <Field label="Supplier" hint="Approved suppliers only — optional at draft stage">
           <select className={inputClass} value={form.supplierId} onChange={(e) => set("supplierId")(e.target.value)}>
             <option value="">(not selected)</option>
             {reference.suppliers.map((s) => (
@@ -161,7 +161,46 @@ function NewRequisitionModal({ reference, onClose }: { reference: ReferenceData;
   );
 }
 
+/** Direct download links for the quotation/invoice columns (client change
+ * list): clean files download from the list itself; files still scanning (or
+ * quarantined) render greyed. Clicks must not trigger the row navigation. */
+function DocumentLinks({ files }: { files: RequisitionDocument[] | undefined }) {
+  if (!files || files.length === 0) return <span className="text-slate-400">—</span>;
+  return (
+    <span className="flex flex-col gap-0.5">
+      {files.map((f) => {
+        const label = f.filename.length > 24 ? `${f.filename.slice(0, 21)}…` : f.filename;
+        return f.scan_status === "clean" ? (
+          <a
+            key={f.id}
+            href={`/api/attachments/${f.id}/download`}
+            className="text-slate-700 underline-offset-2 hover:underline"
+            title={`Download ${f.filename}`}
+            onClick={(e) => e.stopPropagation()}
+          >
+            ⬇ {label}
+          </a>
+        ) : (
+          <span key={f.id} className="text-slate-400" title={`${f.filename} (${f.scan_status})`}>
+            {label}
+          </span>
+        );
+      })}
+    </span>
+  );
+}
+
+const STATUS_FILTERS: [string, string][] = [
+  ["draft", "Draft"],
+  ["submitted", "Pending approval"],
+  ["approved", "Approved"],
+  ["closed", "Completed"],
+  ["denied", "Denied"],
+  ["cancelled", "Cancelled"],
+];
+
 export function RequisitionsPage() {
+  const navigate = useNavigate();
   const [status, setStatus] = useState("");
   const [showNew, setShowNew] = useState(false);
   const reference = useApiQuery<ReferenceData>("/api/reference");
@@ -174,14 +213,14 @@ export function RequisitionsPage() {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h1 className="text-lg font-semibold text-slate-900">Requisitions</h1>
-          <p className="mt-1 text-sm text-slate-500">Your requests and those you can see for your cost centres.</p>
+          <p className="mt-1 text-sm text-slate-500">Your requests and those you can see for your department.</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <select className={inputClass} value={status} onChange={(e) => setStatus(e.target.value)} aria-label="Filter by status">
             <option value="">All statuses</option>
-            {["draft", "submitted", "approved", "denied", "closed", "cancelled"].map((s) => (
-              <option key={s} value={s}>
-                {s}
+            {STATUS_FILTERS.map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
               </option>
             ))}
           </select>
@@ -195,10 +234,10 @@ export function RequisitionsPage() {
       {list.data && list.data.requisitions.length === 0 ? <EmptyState message="No requisitions yet." /> : null}
       {list.data && list.data.requisitions.length > 0 ? (
         <div className="mt-4 overflow-x-auto rounded-md border border-slate-200 bg-white">
-          <table className="w-full min-w-[900px] text-left text-sm">
+          <table className="w-full min-w-[1100px] text-left text-sm">
             <thead className="border-b border-slate-200 bg-slate-50 text-xs text-slate-500">
               <tr>
-                {["Reference", "Created", "Requester", "Cost centre", "Category", "Supplier", "Amount", "Status"].map((h) => (
+                {["Reference", "Created", "Requester", "Department", "Category", "Supplier", "Amount", "Status", "Quotations", "Invoice"].map((h) => (
                   <th key={h} className="px-3 py-2 font-medium">
                     {h}
                   </th>
@@ -206,26 +245,50 @@ export function RequisitionsPage() {
               </tr>
             </thead>
             <tbody>
-              {list.data.requisitions.map((r) => (
-                <tr key={r.id} className="border-b border-slate-100 hover:bg-slate-50">
-                  <td className="px-3 py-2">
-                    <Link className="font-medium text-slate-900 underline-offset-2 hover:underline" to={`/requisitions/${r.id}`}>
-                      {r.reference}
-                    </Link>
-                  </td>
-                  <td className="px-3 py-2 text-slate-500">{formatDate(r.created_at)}</td>
-                  <td className="px-3 py-2">{r.requester_name}</td>
-                  <td className="px-3 py-2">{r.cost_centre_code}</td>
-                  <td className="px-3 py-2">{r.category_code}</td>
-                  <td className="px-3 py-2">{r.supplier_name ?? "—"}</td>
-                  <td className="px-3 py-2 tabular-nums">
-                    <Money amount={r.amount} currency={r.currency} />
-                  </td>
-                  <td className="px-3 py-2">
-                    <StatusBadge status={r.status} />
-                  </td>
-                </tr>
-              ))}
+              {list.data.requisitions.map((r) => {
+                const display = requisitionDisplayStatus(r);
+                return (
+                  // The whole row opens the requisition (client change list) —
+                  // the reference stays a real link for keyboard/middle-click.
+                  <tr
+                    key={r.id}
+                    className="cursor-pointer border-b border-slate-100 hover:bg-slate-50"
+                    onClick={() => navigate(`/requisitions/${r.id}`)}
+                  >
+                    <td className="px-3 py-2">
+                      <Link
+                        className="font-medium text-slate-900 underline-offset-2 hover:underline"
+                        to={`/requisitions/${r.id}`}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {r.reference}
+                      </Link>
+                    </td>
+                    <td className="px-3 py-2 text-slate-500">{formatDate(r.created_at)}</td>
+                    <td className="px-3 py-2">{r.requester_name}</td>
+                    <td className="px-3 py-2">{r.department ?? r.cost_centre_code}</td>
+                    <td className="px-3 py-2">{r.category_code}</td>
+                    <td className="px-3 py-2">{r.supplier_name ?? "—"}</td>
+                    <td className="px-3 py-2 tabular-nums">
+                      <Money amount={r.amount} currency={r.currency} />
+                    </td>
+                    <td className="px-3 py-2">
+                      <StatusBadge status={display.badge} />
+                      {display.pendingDocument ? (
+                        <span className="mt-0.5 block text-[11px] text-amber-700">
+                          {display.pendingDocument === "quotation" ? "quotation pending" : "invoice pending"}
+                        </span>
+                      ) : null}
+                    </td>
+                    <td className="px-3 py-2">
+                      <DocumentLinks files={r.quote_files} />
+                    </td>
+                    <td className="px-3 py-2">
+                      <DocumentLinks files={r.invoice_files} />
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

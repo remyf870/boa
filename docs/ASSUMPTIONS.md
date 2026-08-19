@@ -236,6 +236,83 @@ while fixing:
   steps whose invoice is no longer `pending_reapproval`; a proper `void` decision value is
   deferred (KNOWN-GAPS D4) because it needs an enum migration.
 
+### 2.21 Client change wave (2026-08-08) — tiers, departments, suppliers, Accounts final review
+
+Implemented from the client's "Changes to make to BOA app" note plus the MML DOA Framework
+draft v1 (IMP 26302), the GGP 2 policy, the Rentals Trinidad org chart and the BAN Oct–May26
+report (migrations `0013`/`0014`). Decisions embedded:
+
+- **Tiered approver model.** Approver grants carry a `tier` (5 = supervisors/first-line
+  managers, 4 = senior managers/VPs, 3 = executive); DOA rules may route on `tier:N`
+  descriptors alongside the existing job_title/user/role forms. The seeded dev matrix routes
+  0→34k TTD `tier:5`, 34k→170k `tier:5 → tier:4`, 170k+ `tier:5 → tier:4 → tier:3`.
+  `TODO(client)` — the TT$ bands approximate the framework's US$5k/US$25k limits at ~6.8
+  TTD/USD; confirm the conversion policy and exact bands (they are DOA data, not code).
+- **Departments.** The UI presents cost centres as departments (one row per department; the
+  Rentals pilot seeds a single RENTALS row, so there is one department budget with category
+  lines). Users carry a display-only `home_cost_centre_id` shown in the top bar; authority
+  still flows exclusively from role grants (A.5.15). A DB-level rename of
+  `cost_centres`/`cost_centre_id` is deliberately deferred — 650+ references across
+  code/RLS/tests for zero behavioural gain.
+- **Accounts final hurdle.** Every submitted requisition gets a final `finance_review` step
+  nominally assigned to the earliest-granted active org-wide `accounting` holder; the DB
+  state machine refuses approval while it is undecided; denial by Accounts denies the
+  requisition. Config: `app_settings.accounting_final_approval` (default true; the phase1-3
+  test fixture pins it false to keep covering the legacy single-track chain). SoD pairs:
+  accounting × requester ("the vetoing body must have no incentive to spend") and — added
+  by the 2026-08-09 review fixes — accounting × doa_admin / doa_approver (nobody who
+  uploads or activates the DOA sits as the final financial veto under it; the assignment
+  picker additionally excludes the frozen version's uploader/activator at runtime, since
+  historical role changes can predate the trigger). 0014 fails loudly at migration time if
+  pre-existing grants violate the new pairs.
+- **finance_review is ROLE-addressed at decision time** (2026-08-09 review fix). Any active
+  accounting holder sees the step in their queue and may decide it; the decision stamps the
+  actual decider into `assigned_user_id`. Rationale: accounting can never hold `approver`
+  (SoD), so delegation can never cover an absence — a person-addressed final hurdle froze
+  every requisition while its one assignee was away. The nominal assignee remains for
+  display; notifications and SLA reminders/escalations fan out to all active accounting
+  holders. Revoking a user's `accounting` grant reassigns their pending finance steps (or
+  raises `approval_step_unassignable`), same as approver revocations always did.
+- **Supplier approval workflow.** Suppliers now enter as `pending_approval` (requested by
+  any approver, or recorded/bulk-uploaded by the sysadmin) and become usable only when an
+  org-wide `supplier_approver` (seeded to the Snr Manager Rentals, Tier 4) approves —
+  two-person rule enforced in code and by DB CHECK; sysadmin is SoD-excluded from
+  supplier_approver. `/api/reference` keeps exposing `active` suppliers only. The
+  2026-08-09 review fixes hardened the record itself: status carries its evidence
+  (active ⇒ approved_by/at for requested rows; rejected ⇒ who/when/why), a state-machine
+  trigger makes rejection terminal and freezes identity/evidence outside their writing
+  transition, and a partial unique index (`lower(name)` over live rows) closes the
+  concurrent-duplicate race. **A requisition referencing a supplier now hard-requires it to
+  be `active`** — enforced at create/PATCH (400), at submit (422, the authoritative gate)
+  and by the requisitions state machine (defence in depth). The supplier field itself stays
+  optional. `TODO(client)` — confirm who really holds supplier approval (Tier 4 vs AVP
+  Finance) and whether a supplier should become mandatory on every requisition.
+- **Pre-provisioned users.** The sysadmin can create users before first sign-in
+  (placeholder identity `pending-…`); the row is claimed at first real login by
+  case-insensitive email match, so pre-granted roles apply from day one. Guards added by
+  the 2026-08-09 review fixes: `app_settings.allowed_email_domains` restricts the domains
+  the sysadmin may pre-provision under (empty = any, the pilot posture — `TODO(client)`:
+  confirm the real domain list), and every claim of a role-bearing pending row raises a
+  `pre_provisioned_role_claim` alert (critical when the roles include an approver-class or
+  admin role). Residual risk (one human, two tenant identities) is documented in
+  KNOWN-GAPS G2.
+- **Production topology fixes (2026-08-09).** The dev/test DB connects as table owner and
+  bypasses RLS, which had hidden that the finalisation `UPDATE requisitions` (approve/deny/
+  close) matched zero rows under the non-owner `massy_app` role — approvals would have
+  committed audit + notifications while the row stayed `submitted`. 0014 rewrites the
+  `requisitions_update_by_approver` policy (decided-step arm + accounting approved→closed
+  arm), the decide/close paths now fail loudly on a zero-row update, and a regression test
+  replays the decide sequence under `SET ROLE massy_app`. Startup (production only) now
+  also refuses to run when `schema_migrations` is behind or drifted from the on-disk
+  migration files — a pre-0014 database used to boot cleanly and then 500 on every
+  authenticated request.
+- **Seed identities.** Dev seed now mirrors the Rentals Trinidad org chart (Jason Daniel
+  Tier 4; Danielle Contant/Fabian Green/supervisors Tier 5; coordinators/agents requesters;
+  "M. Awai" AVP Finance as accounting + budget approver; synthetic VP Operations for
+  Tier 3) with non-routable `@massymotors.test` emails. `TODO(client)` — confirm VP
+  Operations identity (TBD in the DOA) and the Short-Term Rentals matrix (currently shares
+  the Rentals department/DOA per the framework's "same template" note).
+
 ---
 
 ## 3. Resolved assumptions

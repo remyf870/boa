@@ -57,7 +57,7 @@ export function AccountingPage() {
           {queue.data.queue.map((q) => (
             <div key={q.invoice_id} className="rounded-md border border-slate-200 bg-white">
               <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
-                <div className="text-sm">
+                <div className="min-w-0 break-words text-sm">
                   <p className="font-medium text-slate-900">
                     {q.invoice_no} · <Money amount={q.invoice_amount} currency={q.currency} />
                     <span className="ml-2">
@@ -85,7 +85,7 @@ export function AccountingPage() {
                     </p>
                   ) : null}
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <a
                     className="rounded border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
                     href={`/api/attachments/${q.attachment_id}/download`}

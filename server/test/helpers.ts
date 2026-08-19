@@ -173,6 +173,12 @@ export async function createWorkflowFixture(db: pg.Pool): Promise<WorkflowFixtur
     )
   ).rows[0]!.id;
 
+  // The Phase 1-3 suite encodes the pre-0014 single-track chain (DOA steps
+  // only). The Accounts final-review step is configuration
+  // (accounting_final_approval, default ON in 0014); pin it OFF here so the
+  // legacy flows stay covered — change-wave.integration.test.ts covers ON.
+  await db.query(`UPDATE app_settings SET value = 'false'::jsonb WHERE key = 'accounting_final_approval'`);
+
   // Active DOA: uploaded by doaAdmin, activated by fd (two-person rule)
   const nextVersionNo = (
     await db.query<{ n: number }>('SELECT coalesce(max(version_no), 0) + 1 AS n FROM doa_matrix_versions')
