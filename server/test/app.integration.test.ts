@@ -377,9 +377,25 @@ describe.skipIf(!TEST_DATABASE_URL)('application compliance gates', () => {
   it('A.8.28: security headers are present on every response', async () => {
     const res = await app.inject({ method: 'GET', url: '/api/health' });
     expect(res.headers['content-security-policy']).toContain("default-src 'self'");
-    expect(res.headers['strict-transport-security']).toContain('max-age');
+    // HSTS is deliberately withheld on plain-http deployments (this app is
+    // built with APP_BASE_URL http://…) so dev servers can't poison the
+    // browser's HSTS store for the host.
+    expect(res.headers['strict-transport-security']).toBeUndefined();
+    expect(res.headers['content-security-policy']).not.toContain('upgrade-insecure-requests');
     expect(res.headers['x-content-type-options']).toBe('nosniff');
     expect(res.headers['x-frame-options']).toBe('DENY');
+  });
+
+  it('A.8.28: HSTS and upgrade-insecure-requests are sent on https deployments', async () => {
+    const httpsApp = await buildApp(testConfig({ APP_BASE_URL: 'https://boa.example.test' }), db);
+    try {
+      const res = await httpsApp.inject({ method: 'GET', url: '/api/health' });
+      expect(res.headers['strict-transport-security']).toContain('max-age=63072000');
+      expect(res.headers['strict-transport-security']).toContain('includeSubDomains');
+      expect(res.headers['content-security-policy']).toContain('upgrade-insecure-requests');
+    } finally {
+      await httpsApp.close();
+    }
   });
 
   it('logout revokes the session server-side', async () => {
