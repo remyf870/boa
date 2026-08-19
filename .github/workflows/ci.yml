@@ -150,6 +150,6 @@ jobs:
       # secret — add it, and enable this job as a required status check
       # under branch protection (A.8.25).
       - name: Gitleaks (A.8.9)
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
